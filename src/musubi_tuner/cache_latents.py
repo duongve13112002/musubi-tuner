@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import os
 from typing import Optional, Union
 
@@ -301,7 +302,6 @@ def encode_datasets(
     for dataset_idx, dataset in enumerate(datasets):
         logger.info(f"Encoding dataset [{dataset_idx}]")
         all_latent_cache_paths = []
-        global_item_index = 0
         for _, batch in tqdm(dataset.retrieve_latent_cache_batches(num_workers), disable=not is_main_process):
             batch: list[ItemInfo] = batch
             if not supports_alpha:
@@ -316,12 +316,15 @@ def encode_datasets(
             # collect ALL paths on every process for correct cleanup tracking
             all_latent_cache_paths.extend([item.latent_cache_path for item in batch])
 
-            # shard: each process encodes only its assigned items
+            # shard: assign each item to exactly one process via deterministic hash of its key,
+            # so assignment is independent of iteration order across processes
             if num_processes > 1:
-                shard_batch = [item for j, item in enumerate(batch) if (global_item_index + j) % num_processes == process_index]
+                shard_batch = [
+                    item for item in batch
+                    if int.from_bytes(hashlib.md5(item.item_key.encode()).digest()[:4], "little") % num_processes == process_index
+                ]
             else:
                 shard_batch = batch
-            global_item_index += len(batch)
 
             if args.skip_existing:
                 shard_batch = [item for item in shard_batch if not os.path.exists(item.latent_cache_path)]
