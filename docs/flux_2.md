@@ -263,9 +263,9 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
 - Logging (`--wandb_run_name`, `--log_tracker_name`, `--log_tracker_config`), HuggingFace upload (`--huggingface_repo_id`), state saving (`--save_state`, `--save_state_on_train_end`), and resume from checkpoint (`--resume`) all work identically to LoRA training.
 - On Ampere or newer GPUs, `--cuda_allow_tf32` enables TF32 for faster matrix multiply, and `--cuda_cudnn_benchmark` enables the cuDNN auto-tuner.
 
-**Multi-GPU**: Multi-GPU training via DDP is supported. Use `accelerate launch` with `--num_processes N`. The data loader and gradient sync are handled automatically by HuggingFace Accelerate, identical to LoRA training.
+**Multi-GPU (DDP)**: Supported for data-parallel training. Use `accelerate launch --num_processes N`. Each GPU receives a full copy of the model, so each GPU must have enough VRAM to hold the entire model. Gradient synchronisation is handled automatically by HuggingFace Accelerate, identical to LoRA training.
 
-**DeepSpeed**: Not supported. Full fine-tuning scripts use standard DDP via HuggingFace Accelerate, same as `zimage_train.py` and `qwen_image_train.py`. This is consistent with how all full fine-tuning scripts in this project work.
+**DeepSpeed / ZeRO**: Not currently supported by any training script in this project (the shared `prepare_accelerator()` function does not set up a `DeepSpeedPlugin`). DeepSpeed ZeRO Stage 3 would be needed to shard model parameters across GPUs when the model is too large to fit on a single GPU. For models that do not fit on one GPU, use `--blocks_to_swap` to offload transformer blocks to CPU RAM instead.
 
 The saved checkpoint is a full DiT safetensors file and can be loaded with `--dit` in `flux_2_generate_image.py` (no `--lora_weight` needed).
 
@@ -282,8 +282,8 @@ The saved checkpoint is a full DiT safetensors file and can be loaded with `--di
 - `--fp8_base`と`--fp8_scaled`はフルファインチューニングでは**サポートされていません**（警告と共に自動的に無効化されます）。FP8は量子化技術であり、勾配更新と非互換です。
 - ログ記録（`--wandb_run_name`等）、HuggingFaceアップロード（`--huggingface_repo_id`）、状態保存（`--save_state`）、チェックポイントからの再開（`--resume`）はLoRA学習と同様に動作します。
 - Ampere以降のGPUでは、`--cuda_allow_tf32`でTF32を有効化して行列演算を高速化できます。`--cuda_cudnn_benchmark`でcuDNNオートチューナーを有効化できます。
-- **マルチGPU**: DDP（DistributedDataParallel）によるマルチGPU学習がサポートされています。`accelerate launch --num_processes N`で起動してください。LoRA学習と同様にHuggingFace Accelerateが自動的に処理します。
-- **DeepSpeed**: サポートされていません。フルファインチューニングスクリプトは標準DDPを使用します。これは`zimage_train.py`や`qwen_image_train.py`と同様の設計です。
+- **マルチGPU (DDP)**: データ並列学習がサポートされています。`accelerate launch --num_processes N`で起動してください。各GPUがモデルのフルコピーを持つため、各GPUにモデル全体を収めるのに十分なVRAMが必要です。LoRA学習と同様にHuggingFace Accelerateが自動的に処理します。
+- **DeepSpeed / ZeRO**: 現在このプロジェクトのいかなる学習スクリプトでもサポートされていません（共有の`prepare_accelerator()`関数が`DeepSpeedPlugin`を設定していません）。DeepSpeed ZeRO Stage 3はモデルパラメーターを複数GPU間でシャードするために必要ですが、現時点では未実装です。1GPUに収まらないモデルには`--blocks_to_swap`でTransformerブロックをCPU RAMにオフロードする方法を使用してください。
 - 保存されたチェックポイントは完全なDiT safetensorsファイルであり、`flux_2_generate_image.py`の`--dit`に直接指定できます（`--lora_weight`は不要）。
 
 </details>
