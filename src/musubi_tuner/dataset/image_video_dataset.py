@@ -43,7 +43,7 @@ class ItemInfo:
     def __init__(
         self,
         item_key: str,
-        caption: str,
+        caption_or_captions: Union[str, list[str]],
         original_size: tuple[int, int],
         bucket_size: Optional[tuple[Any]] = None,
         frame_count: Optional[int] = None,
@@ -51,7 +51,10 @@ class ItemInfo:
         latent_cache_path: Optional[str] = None,
     ) -> None:
         self.item_key = item_key
-        self.caption = caption
+        if isinstance(caption_or_captions, list):
+            self.captions: list[str] = caption_or_captions if caption_or_captions else [""]
+        else:
+            self.captions = [caption_or_captions]
         self.original_size = original_size
         self.bucket_size = bucket_size
         self.frame_count = frame_count
@@ -68,9 +71,20 @@ class ItemInfo:
         self.fp_1f_target_index: Optional[int] = None  # target index for 1f clean latents
         self.fp_1f_no_post: Optional[bool] = None  # whether to add zero values as clean latent post
 
+    @property
+    def caption(self) -> str:
+        return self.captions[0] if self.captions else ""
+
+    @caption.setter
+    def caption(self, value: str):
+        if self.captions:
+            self.captions[0] = value
+        else:
+            self.captions = [value]
+
     def __str__(self) -> str:
         return (
-            f"ItemInfo(item_key={self.item_key}, caption={self.caption}, "
+            f"ItemInfo(item_key={self.item_key}, captions={self.captions}, "
             + f"original_size={self.original_size}, bucket_size={self.bucket_size}, "
             + f"frame_count={self.frame_count}, latent_cache_path={self.latent_cache_path}, "
             + f"content={[c.shape for c in self.content] if isinstance(self.content, list) else (self.content.shape if self.content is not None else None)}), "
@@ -113,6 +127,7 @@ class BaseDataset(torch.utils.data.Dataset):
         cache_directory: Optional[str] = None,
         debug_dataset: bool = False,
         architecture: str = "no_default",
+        caption_dropout_rate: float = 0.0,
     ):
         self.resolution = resolution
         self.caption_extension = caption_extension
@@ -123,6 +138,7 @@ class BaseDataset(torch.utils.data.Dataset):
         self.cache_directory = cache_directory
         self.debug_dataset = debug_dataset
         self.architecture = architecture
+        self.caption_dropout_rate = caption_dropout_rate
         self.seed = None
         self.current_epoch = 0
         self.shared_epoch = None
@@ -285,6 +301,7 @@ class ImageDataset(BaseDataset):
         control_resolution: Optional[Tuple[int, int]] = None,
         debug_dataset: bool = False,
         architecture: str = "no_default",
+        caption_dropout_rate: float = 0.0,
     ):
         super(ImageDataset, self).__init__(
             resolution,
@@ -296,6 +313,7 @@ class ImageDataset(BaseDataset):
             cache_directory,
             debug_dataset,
             architecture,
+            caption_dropout_rate,
         )
         self.image_directory = image_directory
         self.image_jsonl_file = image_jsonl_file
@@ -541,7 +559,15 @@ class ImageDataset(BaseDataset):
             bucketed_item_info[bucket_reso] = bucket
 
         # prepare batch manager
-        self.batch_manager = BucketBatchManager(bucketed_item_info, self.batch_size, num_timestep_buckets=num_timestep_buckets)
+        from musubi_tuner.dataset.cache_io import get_empty_caption_cache_path
+        empty_path = get_empty_caption_cache_path(self.cache_directory) if self.caption_dropout_rate > 0 else None
+        self.batch_manager = BucketBatchManager(
+            bucketed_item_info,
+            self.batch_size,
+            num_timestep_buckets=num_timestep_buckets,
+            caption_dropout_rate=self.caption_dropout_rate,
+            empty_caption_cache_path=empty_path,
+        )
         self.batch_manager.show_bucket_info()
 
         self.num_train_items = sum([len(bucket) for bucket in bucketed_item_info.values()])
@@ -589,6 +615,7 @@ class VideoDataset(BaseDataset):
         fp_latent_window_size: Optional[int] = 9,
         debug_dataset: bool = False,
         architecture: str = "no_default",
+        caption_dropout_rate: float = 0.0,
     ):
         super(VideoDataset, self).__init__(
             resolution,
@@ -600,6 +627,7 @@ class VideoDataset(BaseDataset):
             cache_directory,
             debug_dataset,
             architecture,
+            caption_dropout_rate,
         )
         self.video_directory = video_directory
         self.video_jsonl_file = video_jsonl_file
@@ -875,7 +903,15 @@ class VideoDataset(BaseDataset):
             bucketed_item_info[bucket_reso] = bucket
 
         # prepare batch manager
-        self.batch_manager = BucketBatchManager(bucketed_item_info, self.batch_size, num_timestep_buckets=num_timestep_buckets)
+        from musubi_tuner.dataset.cache_io import get_empty_caption_cache_path
+        empty_path = get_empty_caption_cache_path(self.cache_directory) if self.caption_dropout_rate > 0 else None
+        self.batch_manager = BucketBatchManager(
+            bucketed_item_info,
+            self.batch_size,
+            num_timestep_buckets=num_timestep_buckets,
+            caption_dropout_rate=self.caption_dropout_rate,
+            empty_caption_cache_path=empty_path,
+        )
         self.batch_manager.show_bucket_info()
 
         self.num_train_items = sum([len(bucket) for bucket in bucketed_item_info.values()])

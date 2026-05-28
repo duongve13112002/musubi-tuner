@@ -34,45 +34,41 @@ def encode_and_save_batch(
     device: torch.device,
     accelerator: Optional[accelerate.Accelerator],
 ):
-    prompts = [item.caption for item in batch]
+    from musubi_tuner.dataset.cache_io import get_caption_batches
+    for caption_idx, items, prompts in get_caption_batches(batch):
+        caption_prefix = f"caption_{caption_idx}_"
 
-    # encode prompt with Qwen2.5-VL
-    with torch.no_grad():
-        if accelerator is not None:
-            with accelerator.autocast():
-                embed_vlm, mask_vlm = hunyuan_video_1_5_text_encoder.get_qwen_prompt_embeds(
-                    tokenizer_vlm, text_encoder_vlm, prompts
+        # encode with Qwen2.5-VL (batch)
+        with torch.no_grad():
+            if accelerator is not None:
+                with accelerator.autocast():
+                    embed_vlm, mask_vlm = hunyuan_video_1_5_text_encoder.get_qwen_prompt_embeds(
+                        tokenizer_vlm, text_encoder_vlm, prompts
+                    )
+                    if embed_vlm.dtype == torch.float8_e4m3fn:
+                        embed_vlm = embed_vlm.to(torch.bfloat16)
+            else:
+                embed_vlm, mask_vlm = hunyuan_video_1_5_text_encoder.get_qwen_prompt_embeds(tokenizer_vlm, text_encoder_vlm, prompts)
+
+        # encode with BYT5 (per prompt)
+        embed_byt5_list = []
+        mask_byt5_list = []
+        with torch.no_grad():
+            for prompt in prompts:
+                embed_byt5, mask_byt5 = hunyuan_video_1_5_text_encoder.get_glyph_prompt_embeds(
+                    tokenizer_byt5, text_encoder_byt5, prompt
                 )
-                if embed_vlm.dtype == torch.float8_e4m3fn:
-                    embed_vlm = embed_vlm.to(torch.bfloat16)
-        else:
-            embed_vlm, mask_vlm = hunyuan_video_1_5_text_encoder.get_qwen_prompt_embeds(tokenizer_vlm, text_encoder_vlm, prompts)
+                embed_byt5_list.append(embed_byt5[0])
+                mask_byt5_list.append(mask_byt5[0])
 
-    # encode prompt with BYT5 (for each prompt in batch)
-    embed_byt5_list = []
-    mask_byt5_list = []
-    with torch.no_grad():
-        for prompt in prompts:
-            embed_byt5, mask_byt5 = hunyuan_video_1_5_text_encoder.get_glyph_prompt_embeds(
-                tokenizer_byt5, text_encoder_byt5, prompt
-            )
-            embed_byt5_list.append(embed_byt5[0])  # remove batch dim
-            mask_byt5_list.append(mask_byt5[0])  # remove batch dim
-
-    # save prompt cache
-    for i, item in enumerate(batch):
-        embed_i = embed_vlm[i]
-        mask_i = mask_vlm[i]
-
-        # extract valid length for VLM embedding
-        vlm_len = mask_i.to(dtype=torch.bool).sum().item()
-        embed_i = embed_i[:vlm_len]
-
-        # get BYT5 embedding for this item
-        byt5_len = mask_byt5_list[i].to(dtype=torch.bool).sum().item()  # may be zero
-        embed_byt5_i = embed_byt5_list[i][:byt5_len]
-
-        save_text_encoder_output_cache_hunyuan_video_1_5(item, embed_i, embed_byt5_i)
+        for i, item in enumerate(items):
+            embed_i = embed_vlm[i]
+            mask_i = mask_vlm[i]
+            vlm_len = mask_i.to(dtype=torch.bool).sum().item()
+            embed_i = embed_i[:vlm_len]
+            byt5_len = mask_byt5_list[i].to(dtype=torch.bool).sum().item()
+            embed_byt5_i = embed_byt5_list[i][:byt5_len]
+            save_text_encoder_output_cache_hunyuan_video_1_5(item, embed_i, embed_byt5_i, caption_prefix=caption_prefix)
 
 
 def main():
@@ -126,6 +122,23 @@ def main():
         encode_for_text_encoders,
         accelerator=accelerator,
     )
+    def encode_empty_hv15(item: ItemInfo):
+        nonlocal tokenizer_vlm, text_encoder_vlm, tokenizer_byt5, text_encoder_byt5
+        prompts = [item.caption]
+        with torch.no_grad():
+            if args.fp8_vl:
+                with accelerator.autocast():
+                    embed_vlm, mask_vlm = hunyuan_video_1_5_text_encoder.get_qwen_prompt_embeds(tokenizer_vlm, text_encoder_vlm, prompts)
+                    if embed_vlm.dtype == torch.float8_e4m3fn:
+                        embed_vlm = embed_vlm.to(torch.bfloat16)
+            else:
+                embed_vlm, mask_vlm = hunyuan_video_1_5_text_encoder.get_qwen_prompt_embeds(tokenizer_vlm, text_encoder_vlm, prompts)
+            embed_byt5, mask_byt5 = hunyuan_video_1_5_text_encoder.get_glyph_prompt_embeds(tokenizer_byt5, text_encoder_byt5, item.caption)
+        vlm_len = mask_vlm[0].to(dtype=torch.bool).sum().item()
+        byt5_len = mask_byt5[0].to(dtype=torch.bool).sum().item()
+        save_text_encoder_output_cache_hunyuan_video_1_5(item, embed_vlm[0][:vlm_len], embed_byt5[0][:byt5_len], caption_prefix="")
+
+    cache_text_encoder_outputs.encode_empty_caption_embeddings(encode_empty_hv15, datasets, accelerator)
     del text_encoder_vlm, text_encoder_byt5
 
     # remove cache files not in dataset

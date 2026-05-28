@@ -40,23 +40,49 @@ def encode_prompt(text_encoder: TextEncoder, prompt: Union[str, list[str]]):
 def encode_and_save_batch(
     text_encoder: TextEncoder, batch: list[ItemInfo], is_llm: bool, accelerator: Optional[accelerate.Accelerator]
 ):
-    prompts = [item.caption for item in batch]
-    # print(prompts)
+    from musubi_tuner.dataset.cache_io import get_caption_batches
+    for caption_idx, items, prompts in get_caption_batches(batch):
+        caption_prefix = f"caption_{caption_idx}_"
 
-    # encode prompt
-    if accelerator is not None:
-        with accelerator.autocast():
+        if accelerator is not None:
+            with accelerator.autocast():
+                prompt_embeds, prompt_mask = encode_prompt(text_encoder, prompts)
+        else:
             prompt_embeds, prompt_mask = encode_prompt(text_encoder, prompts)
-    else:
-        prompt_embeds, prompt_mask = encode_prompt(text_encoder, prompts)
 
-    # # convert to fp16 if needed
-    # if prompt_embeds.dtype == torch.float32 and text_encoder.dtype != torch.float32:
-    #     prompt_embeds = prompt_embeds.to(text_encoder.dtype)
+        for item, embed, mask in zip(items, prompt_embeds, prompt_mask):
+            save_text_encoder_output_cache(item, embed, mask, is_llm, caption_prefix=caption_prefix)
 
-    # save prompt cache
-    for item, embed, mask in zip(batch, prompt_embeds, prompt_mask):
-        save_text_encoder_output_cache(item, embed, mask, is_llm)
+
+def encode_empty_caption_embeddings(
+    encode_single: callable,
+    datasets: list[BaseDataset],
+    accelerator: Optional[accelerate.Accelerator] = None,
+):
+    """Encode the empty string '' once per dataset and save to the global empty embedding file.
+
+    encode_single(item) must encode item.caption (which will be "") and save to
+    item.text_encoder_output_cache_path using bare keys (caption_prefix="").
+    Only runs on the main process; barriers are handled by the caller.
+    """
+    is_main = accelerator.is_main_process if accelerator is not None else True
+    if not is_main:
+        return
+
+    from musubi_tuner.dataset.cache_io import get_empty_caption_cache_path
+    from musubi_tuner.dataset.image_video_dataset import ItemInfo
+
+    for dataset in datasets:
+        if not getattr(dataset, "caption_dropout_rate", 0):
+            continue
+        empty_path = get_empty_caption_cache_path(dataset.cache_directory)
+        if os.path.exists(empty_path):
+            logger.info(f"Empty caption embedding already exists: {empty_path}, skipping")
+            continue
+        logger.info(f"Encoding empty caption embedding for dataset: {dataset.cache_directory}")
+        empty_item = ItemInfo("__empty__", [""], (0, 0))
+        empty_item.text_encoder_output_cache_path = empty_path
+        encode_single(empty_item)
 
 
 def prepare_cache_files_and_paths(datasets: list[BaseDataset]):
@@ -200,6 +226,16 @@ def main():
         encode_for_text_encoder_1,
         accelerator=accelerator,
     )
+
+    def encode_empty_te1(item: ItemInfo):
+        if accelerator is not None:
+            with accelerator.autocast():
+                embeds, masks = encode_prompt(text_encoder_1, [item.caption])
+        else:
+            embeds, masks = encode_prompt(text_encoder_1, [item.caption])
+        save_text_encoder_output_cache(item, embeds[0], masks[0], is_llm=True, caption_prefix="")
+
+    encode_empty_caption_embeddings(encode_empty_te1, datasets, accelerator)
     del text_encoder_1
 
     # Load Text Encoder 2
@@ -224,6 +260,12 @@ def main():
         encode_for_text_encoder_2,
         accelerator=accelerator,
     )
+
+    def encode_empty_te2(item: ItemInfo):
+        embeds, masks = encode_prompt(text_encoder_2, [item.caption])
+        save_text_encoder_output_cache(item, embeds[0], masks[0], is_llm=False, caption_prefix="")
+
+    encode_empty_caption_embeddings(encode_empty_te2, datasets, accelerator)
     del text_encoder_2
 
     # remove cache files not in dataset

@@ -211,7 +211,7 @@ class ImageDirectoryDatasource(ImageDatasource):
     def __len__(self):
         return len(self.image_paths)
 
-    def get_image_data(self, idx: int) -> tuple[str, list[Image.Image], str, Optional[list[Image.Image]]]:
+    def get_image_data(self, idx: int) -> tuple[str, list[Image.Image], list[str], Optional[list[Image.Image]]]:
         image_path = self.image_paths[idx]
         image_paths = [image_path]
         if self.multiple_target:
@@ -225,7 +225,7 @@ class ImageDirectoryDatasource(ImageDatasource):
                 img = img.convert("RGB")
             images.append(img)
 
-        _, caption = self.get_caption(idx)
+        _, captions = self.get_caption(idx)
 
         controls = None
         if self.has_control:
@@ -236,14 +236,14 @@ class ImageDirectoryDatasource(ImageDatasource):
                     control = control.convert("RGB")
                 controls.append(control)
 
-        return image_path, images, caption, controls
+        return image_path, images, captions, controls
 
-    def get_caption(self, idx: int) -> tuple[str, str]:
+    def get_caption(self, idx: int) -> tuple[str, list[str]]:
         image_path = self.image_paths[idx]
         caption_path = os.path.splitext(image_path)[0] + self.caption_extension if self.caption_extension else ""
         with open(caption_path, "r", encoding="utf-8") as f:
-            caption = f.read().strip()
-        return image_path, caption
+            lines = [line.strip() for line in f.read().splitlines() if line.strip()]
+        return image_path, lines if lines else [""]
 
     def __iter__(self):
         self.current_idx = 0
@@ -330,7 +330,7 @@ class ImageJsonlDatasource(ImageDatasource):
     def __len__(self):
         return len(self.data)
 
-    def get_image_data(self, idx: int) -> tuple[str, list[Image.Image], str, Optional[list[Image.Image]]]:
+    def get_image_data(self, idx: int) -> tuple[str, list[Image.Image], list[str], Optional[list[Image.Image]]]:
         data = self.data[idx]
         image_path = data.get("image_path", data.get("image_path_0"))
         image_paths = [image_path]
@@ -353,7 +353,7 @@ class ImageJsonlDatasource(ImageDatasource):
                 img = img.convert("RGB")
             images.append(img)
 
-        caption = data["caption"]
+        _, captions = self.get_caption(idx)
 
         controls = None
         if self.has_control:
@@ -367,13 +367,16 @@ class ImageJsonlDatasource(ImageDatasource):
                     control = control.convert("RGB")
                 controls.append(control)
 
-        return image_path, images, caption, controls
+        return image_path, images, captions, controls
 
-    def get_caption(self, idx: int) -> tuple[str, str]:
+    def get_caption(self, idx: int) -> tuple[str, list[str]]:
         data = self.data[idx]
         image_path = data.get("image_path", data.get("image_path_0"))
-        caption = data["caption"]
-        return image_path, caption
+        if "captions" in data:
+            captions = [c for c in data["captions"] if isinstance(c, str) and c.strip()]
+        else:
+            captions = [data["caption"]]
+        return image_path, captions if captions else [""]
 
     def __iter__(self):
         self.current_idx = 0
@@ -534,25 +537,25 @@ class VideoDirectoryDatasource(VideoDatasource):
         start_frame: Optional[int] = None,
         end_frame: Optional[int] = None,
         bucket_selector: Optional[BucketSelector] = None,
-    ) -> tuple[str, list[Image.Image], str, Optional[list[Image.Image]]]:
+    ) -> tuple[str, list[Image.Image], list[str], Optional[list[Image.Image]]]:
         video_path = self.video_paths[idx]
         video = self.get_video_data_from_path(video_path, start_frame, end_frame, bucket_selector)
 
-        _, caption = self.get_caption(idx)
+        _, captions = self.get_caption(idx)
 
         control = None
         if self.control_directory is not None and video_path in self.control_paths:
             control_path = self.control_paths[video_path]
             control = self.get_control_data_from_path(control_path, start_frame, end_frame, bucket_selector)
 
-        return video_path, video, caption, control
+        return video_path, video, captions, control
 
-    def get_caption(self, idx: int) -> tuple[str, str]:
+    def get_caption(self, idx: int) -> tuple[str, list[str]]:
         video_path = self.video_paths[idx]
         caption_path = os.path.splitext(video_path)[0] + self.caption_extension if self.caption_extension else ""
         with open(caption_path, "r", encoding="utf-8") as f:
-            caption = f.read().strip()
-        return video_path, caption
+            lines = [line.strip() for line in f.read().splitlines() if line.strip()]
+        return video_path, lines if lines else [""]
 
     def __iter__(self):
         self.current_idx = 0
@@ -617,25 +620,28 @@ class VideoJsonlDatasource(VideoDatasource):
         start_frame: Optional[int] = None,
         end_frame: Optional[int] = None,
         bucket_selector: Optional[BucketSelector] = None,
-    ) -> tuple[str, list[Image.Image], str, Optional[list[Image.Image]]]:
+    ) -> tuple[str, list[Image.Image], list[str], Optional[list[Image.Image]]]:
         data = self.data[idx]
         video_path = data["video_path"]
         video = self.get_video_data_from_path(video_path, start_frame, end_frame, bucket_selector)
 
-        caption = data["caption"]
+        _, captions = self.get_caption(idx)
 
         control = None
         if "control_path" in data and data["control_path"]:
             control_path = data["control_path"]
             control = self.get_control_data_from_path(control_path, start_frame, end_frame, bucket_selector)
 
-        return video_path, video, caption, control
+        return video_path, video, captions, control
 
-    def get_caption(self, idx: int) -> tuple[str, str]:
+    def get_caption(self, idx: int) -> tuple[str, list[str]]:
         data = self.data[idx]
         video_path = data["video_path"]
-        caption = data["caption"]
-        return video_path, caption
+        if "captions" in data:
+            captions = [c for c in data["captions"] if isinstance(c, str) and c.strip()]
+        else:
+            captions = [data["caption"]]
+        return video_path, captions if captions else [""]
 
     def __iter__(self):
         self.current_idx = 0

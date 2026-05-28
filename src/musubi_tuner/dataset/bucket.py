@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import random
 from typing import Any, Optional, Tuple, TYPE_CHECKING
 
@@ -157,13 +158,20 @@ class BucketSelector:
 
 class BucketBatchManager:
     def __init__(
-        self, bucketed_item_info: dict[tuple[Any], list[ItemInfo]], batch_size: int, num_timestep_buckets: Optional[int] = None
+        self,
+        bucketed_item_info: dict[tuple[Any], list[ItemInfo]],
+        batch_size: int,
+        num_timestep_buckets: Optional[int] = None,
+        caption_dropout_rate: float = 0.0,
+        empty_caption_cache_path: Optional[str] = None,
     ):
         self.batch_size = batch_size
         self.buckets = bucketed_item_info
         self.bucket_resos = list(self.buckets.keys())
         self.bucket_resos.sort()
         self.num_timestep_buckets = num_timestep_buckets
+        self.caption_dropout_rate = caption_dropout_rate
+        self.empty_caption_cache_path = empty_caption_cache_path
         self.timestep_pool = None
 
         # indices for enumerating batches. each batch is reso + batch_idx. reso is (width, height) or (width, height, frames)
@@ -226,6 +234,38 @@ class BucketBatchManager:
     def __len__(self):
         return len(self.bucket_batch_indices)
 
+    def _select_caption_variant(self, sd_te: dict) -> dict:
+        """If the cache uses caption_N_ prefixed keys, randomly pick one variant.
+
+        Returns a dict with the caption prefix stripped (bare keys), ready for the
+        existing key-parsing logic in __getitem__.
+        """
+        # Detect multi-caption format by checking for "caption_0_" prefix
+        if not any(k.startswith("caption_0_") for k in sd_te):
+            return sd_te  # old single-caption format, use as-is
+
+        # Collect all numeric caption indices (excludes "caption_empty_*")
+        caption_indices = set()
+        for k in sd_te:
+            if k.startswith("caption_") and not k.startswith("caption_empty_"):
+                part = k.split("_", 2)[1]
+                if part.isdigit():
+                    caption_indices.add(int(part))
+
+        # Caption dropout: use global empty embedding with probability caption_dropout_rate
+        if (
+            self.caption_dropout_rate > 0
+            and self.empty_caption_cache_path is not None
+            and os.path.exists(self.empty_caption_cache_path)
+            and random.random() < self.caption_dropout_rate
+        ):
+            return load_file(self.empty_caption_cache_path)
+
+        # Pick a random caption index and strip its prefix
+        idx = random.choice(sorted(caption_indices))
+        prefix = f"caption_{idx}_"
+        return {k[len(prefix):]: v for k, v in sd_te.items() if k.startswith(prefix)}
+
     def __getitem__(self, idx):
         bucket_reso, batch_idx = self.bucket_batch_indices[idx]
         bucket = self.buckets[bucket_reso]
@@ -237,6 +277,7 @@ class BucketBatchManager:
         for item_info in bucket[start:end]:
             sd_latent = load_file(item_info.latent_cache_path)
             sd_te = load_file(item_info.text_encoder_output_cache_path)
+            sd_te = self._select_caption_variant(sd_te)
             sd = {**sd_latent, **sd_te}
 
             # TODO refactor this

@@ -23,34 +23,14 @@ logging.basicConfig(level=logging.INFO)
 
 
 def encode_and_save_batch(tokenizer, text_encoder, batch: list[ItemInfo], device: torch.device):
-    """
-    Encode a batch of prompts and save their text encoder outputs.
-
-    Args:
-        tokenizer: Qwen3 tokenizer
-        text_encoder: Qwen3 text encoder model
-        batch: List of ItemInfo containing captions to encode
-        device: Device to use for encoding
-    """
-    prompts = [item.caption for item in batch]
-
-    # Encode prompts using Qwen3
-    # get_text_embeds returns (prompt_embeds, prompt_masks)
-    # prompt_embeds: (B, seq_len, hidden_size)
-    # prompt_masks: (B, seq_len) boolean mask
-    prompt_embeds, prompt_masks = zimage_utils.get_text_embeds(tokenizer, text_encoder, prompts)
-
-    # Move to CPU for saving
-    prompt_embeds = prompt_embeds.cpu()
-
-    # Save each item's embedding
-    # We save variable-length embeddings (trimmed to actual text length) to save space
-    for item, embed, mask in zip(batch, prompt_embeds, prompt_masks):
-        # Trim to actual text length based on attention mask
-        actual_length = int(mask.sum().item())
-        embed_trimmed = embed[:actual_length]  # (actual_length, hidden_size)
-
-        save_text_encoder_output_cache_z_image(item, embed_trimmed)
+    from musubi_tuner.dataset.cache_io import get_caption_batches
+    for caption_idx, items, prompts in get_caption_batches(batch):
+        caption_prefix = f"caption_{caption_idx}_"
+        prompt_embeds, prompt_masks = zimage_utils.get_text_embeds(tokenizer, text_encoder, prompts)
+        prompt_embeds = prompt_embeds.cpu()
+        for item, embed, mask in zip(items, prompt_embeds, prompt_masks):
+            actual_length = int(mask.sum().item())
+            save_text_encoder_output_cache_z_image(item, embed[:actual_length], caption_prefix=caption_prefix)
 
 
 def main():
@@ -104,6 +84,15 @@ def main():
         encode_for_text_encoder,
         accelerator=accelerator,
     )
+
+    def encode_empty_zimage(item: ItemInfo):
+        nonlocal tokenizer, text_encoder
+        prompt_embeds, prompt_masks = zimage_utils.get_text_embeds(tokenizer, text_encoder, [item.caption])
+        prompt_embeds = prompt_embeds.cpu()
+        actual_length = int(prompt_masks[0].sum().item())
+        save_text_encoder_output_cache_z_image(item, prompt_embeds[0][:actual_length], caption_prefix="")
+
+    cache_text_encoder_outputs.encode_empty_caption_embeddings(encode_empty_zimage, datasets, accelerator)
 
     # Clean up
     del tokenizer, text_encoder

@@ -35,70 +35,70 @@ def encode_and_save_batch(
     device: torch.device,
     accelerator: Optional[accelerate.Accelerator],
 ):
+    from musubi_tuner.dataset.cache_io import get_caption_batches
     is_edit = vl_processor is not None
-    prompts = [item.caption for item in batch]
-    # print(prompts)
+    for caption_idx, items, prompts in get_caption_batches(batch):
+        caption_prefix = f"caption_{caption_idx}_"
 
-    # prepare images
-    if is_edit:
-        images = []
-        for item in batch:
-            # item.control_content: list of images (H, W, C), optional (but should be provided for Qwen-Image-Edit)
-            if item.control_content is None or len(item.control_content) == 0:
-                # all item should have same number of control images
-                logger.warning(f"Item {item.item_key} has no control content for Qwen-Image-Edit, saving without control images.")
+        # prepare images for edit mode (same control images apply to all caption variants)
+        if is_edit:
+            images = []
+            valid_items = []
+            valid_prompts = []
+            for item, prompt in zip(items, prompts):
+                if item.control_content is None or len(item.control_content) == 0:
+                    logger.warning(f"Item {item.item_key} has no control content for Qwen-Image-Edit, skipping.")
+                    continue
+                control_content = []
+                for cc in item.control_content:
+                    cond_resize_size = image_video_dataset.BucketSelector.calculate_bucket_resolution(
+                        (cc.shape[1], cc.shape[0]),
+                        qwen_image_utils.CONDITION_IMAGE_RESOLUTION,
+                        architecture=ARCHITECTURE_QWEN_IMAGE_EDIT,
+                    )
+                    cc = cc[..., :3] if cc.shape[2] == 4 else cc
+                    cc = image_video_dataset.resize_image_to_bucket(cc, cond_resize_size)
+                    control_content.append(cc)
+                images.append(control_content)
+                valid_items.append(item)
+                valid_prompts.append(prompt)
+            if not valid_items:
                 continue
-
-            # item.control_content, list of np.ndarray, 0-255
-            control_content = []
-            for cc in item.control_content:
-                cond_resize_size = image_video_dataset.BucketSelector.calculate_bucket_resolution(
-                    (cc.shape[1], cc.shape[0]),
-                    qwen_image_utils.CONDITION_IMAGE_RESOLUTION,
-                    architecture=ARCHITECTURE_QWEN_IMAGE_EDIT,
-                )
-                cc = cc[..., :3] if cc.shape[2] == 4 else cc  # ensure RGB, remove alpha if present
-                cc = image_video_dataset.resize_image_to_bucket(cc, cond_resize_size)
-                control_content.append(cc)
-
-            images.append(control_content)  # vl_processor accepts PIL.Image and np.ndarray
-
-        if len(images) == 0:
+            items, prompts = valid_items, valid_prompts
+            if len(images) == 0:
+                images = None
+        else:
             images = None
-    else:
-        images = None
 
-    for i, item in enumerate(batch):
-        logger.debug(
-            f"Item {i}: {item.item_key}, prompt: {item.caption}, control images: {[im.shape for im in images[i] if im is not None] if images is not None else None}"
-        )
+        for i, item in enumerate(items):
+            logger.debug(
+                f"Item {i}: {item.item_key}, prompt: {prompts[i]}, control images: {[im.shape for im in images[i]] if images is not None else None}"
+            )
 
-    # encode prompt
-    with torch.no_grad():
-        if accelerator is not None:
-            with accelerator.autocast():
-                if images is None:  # no control images
+        # encode prompt
+        with torch.no_grad():
+            if accelerator is not None:
+                with accelerator.autocast():
+                    if images is None:
+                        embed, mask = qwen_image_utils.get_qwen_prompt_embeds(tokenizer, text_encoder, prompts)
+                    else:
+                        embed, mask = qwen_image_utils.get_qwen_prompt_embeds_with_image(
+                            vl_processor, text_encoder, prompts, images, model_version=model_version
+                        )
+                    if embed.dtype == torch.float8_e4m3fn:
+                        embed = embed.to(torch.bfloat16)
+            else:
+                if images is None:
                     embed, mask = qwen_image_utils.get_qwen_prompt_embeds(tokenizer, text_encoder, prompts)
                 else:
                     embed, mask = qwen_image_utils.get_qwen_prompt_embeds_with_image(
                         vl_processor, text_encoder, prompts, images, model_version=model_version
                     )
-                if embed.dtype == torch.float8_e4m3fn:  # T5 returns bf16, but QwenVL-2.5 returns fp8
-                    embed = embed.to(torch.bfloat16)
 
-        else:
-            if images is None:  # no control images
-                embed, mask = qwen_image_utils.get_qwen_prompt_embeds(tokenizer, text_encoder, prompts)
-            else:
-                embed, mask = qwen_image_utils.get_qwen_prompt_embeds_with_image(
-                    vl_processor, text_encoder, prompts, images, model_version=model_version
-                )
-
-    # save prompt cache
-    for item, (embed_i, mask_i) in zip(batch, zip(embed, mask)):
-        txt_len = mask_i.to(dtype=torch.bool).sum().item()  # length of the text in the batch
-        embed_i = embed_i[:txt_len]
-        save_text_encoder_output_cache_qwen_image(item, embed_i)
+        for item, (embed_i, mask_i) in zip(items, zip(embed, mask)):
+            txt_len = mask_i.to(dtype=torch.bool).sum().item()
+            embed_i = embed_i[:txt_len]
+            save_text_encoder_output_cache_qwen_image(item, embed_i, caption_prefix=caption_prefix)
 
 
 def main():
@@ -161,6 +161,20 @@ def main():
         requires_content=args.is_edit,
         accelerator=accelerator,
     )
+    def encode_empty_qwen(item: ItemInfo):
+        nonlocal tokenizer, text_encoder
+        with torch.no_grad():
+            if args.fp8_vl:
+                with accelerator.autocast():
+                    embed, mask = qwen_image_utils.get_qwen_prompt_embeds(tokenizer, text_encoder, [item.caption])
+                    if embed.dtype == torch.float8_e4m3fn:
+                        embed = embed.to(torch.bfloat16)
+            else:
+                embed, mask = qwen_image_utils.get_qwen_prompt_embeds(tokenizer, text_encoder, [item.caption])
+        txt_len = mask[0].to(dtype=torch.bool).sum().item()
+        save_text_encoder_output_cache_qwen_image(item, embed[0][:txt_len], caption_prefix="")
+
+    cache_text_encoder_outputs.encode_empty_caption_embeddings(encode_empty_qwen, datasets, accelerator)
     del text_encoder
 
     # remove cache files not in dataset

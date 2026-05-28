@@ -18,15 +18,15 @@ logging.basicConfig(level=logging.INFO)
 
 
 def encode_and_save_batch(text_embedder: torch.nn.Module, batch: list[ItemInfo], device: torch.device, arch_full: str):
-    prompts = [item.caption for item in batch]
-    autocast_dtype = torch.bfloat16 if text_embedder.dtype.itemsize == 1 else text_embedder.dtype  # use bfloat16 for fp8 models
-    with torch.autocast(device_type=device.type, dtype=autocast_dtype), torch.no_grad():
-        ctx_vec = text_embedder(prompts)
-        ctx_vec = ctx_vec.cpu()  # [1, 512, 15360]
-
-    # save prompt cache
-    for item, _ctx_vec in zip(batch, ctx_vec):
-        save_text_encoder_output_cache_flux_2(item, _ctx_vec, arch_full=arch_full)
+    from musubi_tuner.dataset.cache_io import get_caption_batches
+    autocast_dtype = torch.bfloat16 if text_embedder.dtype.itemsize == 1 else text_embedder.dtype
+    for caption_idx, items, prompts in get_caption_batches(batch):
+        caption_prefix = f"caption_{caption_idx}_"
+        with torch.autocast(device_type=device.type, dtype=autocast_dtype), torch.no_grad():
+            ctx_vec = text_embedder(prompts)
+            ctx_vec = ctx_vec.cpu()
+        for item, _ctx_vec in zip(items, ctx_vec):
+            save_text_encoder_output_cache_flux_2(item, _ctx_vec, arch_full=arch_full, caption_prefix=caption_prefix)
 
 
 def main():
@@ -74,6 +74,14 @@ def main():
         encode_for_text_encoder,
         accelerator=accelerator,
     )
+    def encode_empty_flux2(item: ItemInfo):
+        nonlocal text_embedder
+        autocast_dtype = torch.bfloat16 if text_embedder.dtype.itemsize == 1 else text_embedder.dtype
+        with torch.autocast(device_type=device.type, dtype=autocast_dtype), torch.no_grad():
+            ctx_vec = text_embedder([item.caption]).cpu()
+        save_text_encoder_output_cache_flux_2(item, ctx_vec[0], arch_full=model_version_info.architecture_full, caption_prefix="")
+
+    cache_text_encoder_outputs.encode_empty_caption_embeddings(encode_empty_flux2, datasets, accelerator)
     del text_embedder
 
     # remove cache files not in dataset

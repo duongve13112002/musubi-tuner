@@ -40,36 +40,37 @@ def _ensure_cache_architecture(item: ItemInfo):
 
 
 def encode_and_save_batch(text_embedder, batch: list[ItemInfo], device: torch.device):
-    prompts = [item.caption for item in batch]
-    # Keep the cache encoder aligned with training/inference: use video template when the batch contains videos.
-    is_video_batch = any((item.frame_count or 1) > 1 for item in batch)
-    content_type = "video" if is_video_batch else "image"
-    embeds, cu_seqlens, attention_mask = text_embedder.encode(prompts, type_of_content=content_type)
+    from musubi_tuner.dataset.cache_io import get_caption_batches
+    for caption_idx, items, prompts in get_caption_batches(batch):
+        caption_prefix = f"caption_{caption_idx}_"
+        is_video_batch = any((item.frame_count or 1) > 1 for item in items)
+        content_type = "video" if is_video_batch else "image"
+        embeds, cu_seqlens, attention_mask = text_embedder.encode(prompts, type_of_content=content_type)
 
-    text_embeds = embeds["text_embeds"].to("cpu")
-    pooled_embed = embeds["pooled_embed"].to("cpu")
-    attention_mask = attention_mask.to("cpu")
+        text_embeds = embeds["text_embeds"].to("cpu")
+        pooled_embed = embeds["pooled_embed"].to("cpu")
+        attention_mask = attention_mask.to("cpu")
 
-    if text_embeds.dim() == 2 and attention_mask.dim() == 2 and cu_seqlens is not None and cu_seqlens.numel() == len(batch) + 1:
-        # Variable-length packed embeds: slice by cu_seqlens per item.
-        for idx, item in enumerate(batch):
-            start = int(cu_seqlens[idx].item())
-            end = int(cu_seqlens[idx + 1].item())
-            te = text_embeds[start:end]
-            pe = pooled_embed[idx]
-            am = attention_mask[idx].bool().flatten()
-            if am.numel() != te.shape[0]:
-                if am.sum().item() == te.shape[0]:
-                    am = am[am]
-                else:
-                    am = torch.ones((te.shape[0],), dtype=torch.bool)
-            _ensure_cache_architecture(item)
-            save_text_encoder_output_cache_kandinsky5(item, te, pe, am)
-    else:
-        # Fallback: per-item tensors already aligned on batch dim.
-        for item, te, pe, am in zip(batch, text_embeds, pooled_embed, attention_mask):
-            _ensure_cache_architecture(item)
-            save_text_encoder_output_cache_kandinsky5(item, te, pe, am)
+        if text_embeds.dim() == 2 and attention_mask.dim() == 2 and cu_seqlens is not None and cu_seqlens.numel() == len(items) + 1:
+            # Variable-length packed embeds: slice by cu_seqlens per item.
+            for idx, item in enumerate(items):
+                start = int(cu_seqlens[idx].item())
+                end = int(cu_seqlens[idx + 1].item())
+                te = text_embeds[start:end]
+                pe = pooled_embed[idx]
+                am = attention_mask[idx].bool().flatten()
+                if am.numel() != te.shape[0]:
+                    if am.sum().item() == te.shape[0]:
+                        am = am[am]
+                    else:
+                        am = torch.ones((te.shape[0],), dtype=torch.bool)
+                _ensure_cache_architecture(item)
+                save_text_encoder_output_cache_kandinsky5(item, te, pe, am, caption_prefix=caption_prefix)
+        else:
+            # Fallback: per-item tensors already aligned on batch dim.
+            for item, te, pe, am in zip(items, text_embeds, pooled_embed, attention_mask):
+                _ensure_cache_architecture(item)
+                save_text_encoder_output_cache_kandinsky5(item, te, pe, am, caption_prefix=caption_prefix)
 
 
 def main():
@@ -117,6 +118,26 @@ def main():
         encode_for_text_encoder,
         accelerator=accelerator,
     )
+
+    def encode_empty_k5(item: ItemInfo):
+        nonlocal text_embedder
+        content_type = "video" if (item.frame_count or 1) > 1 else "image"
+        embeds, cu_seqlens, attention_mask = text_embedder.encode([item.caption], type_of_content=content_type)
+        text_embeds = embeds["text_embeds"].to("cpu")
+        pooled_embed = embeds["pooled_embed"].to("cpu")
+        attention_mask = attention_mask.to("cpu")
+        if text_embeds.dim() == 2 and cu_seqlens is not None and cu_seqlens.numel() == 2:
+            te = text_embeds[int(cu_seqlens[0].item()):int(cu_seqlens[1].item())]
+            pe = pooled_embed[0]
+            am = attention_mask[0].bool().flatten()
+            if am.numel() != te.shape[0]:
+                am = am[am] if am.sum().item() == te.shape[0] else torch.ones((te.shape[0],), dtype=torch.bool)
+        else:
+            te, pe, am = text_embeds[0], pooled_embed[0], attention_mask[0]
+        _ensure_cache_architecture(item)
+        save_text_encoder_output_cache_kandinsky5(item, te, pe, am, caption_prefix="")
+
+    cache_text_encoder_outputs.encode_empty_caption_embeddings(encode_empty_k5, datasets, accelerator)
 
     # remove cache files not in dataset
     cache_text_encoder_outputs.post_process_cache_files(

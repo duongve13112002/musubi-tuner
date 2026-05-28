@@ -31,35 +31,30 @@ def encode_and_save_batch(
     batch: list[ItemInfo],
     device: torch.device,
 ):
-    prompts = [item.caption for item in batch]
-    # print(prompts)
-
-    # encode prompt
-    t5_tokens = tokenizer1(
-        prompts,
-        max_length=flux_models.T5XXL_MAX_LENGTH,
-        padding="max_length",
-        return_length=False,
-        return_overflowing_tokens=False,
-        truncation=True,
-        return_tensors="pt",
-    )["input_ids"]
-    l_tokens = tokenizer2(prompts, max_length=77, padding="max_length", truncation=True, return_tensors="pt")["input_ids"]
-
-    with torch.autocast(device_type=device.type, dtype=text_encoder1.dtype), torch.no_grad():
-        t5_vec = text_encoder1(input_ids=t5_tokens.to(text_encoder1.device), attention_mask=None, output_hidden_states=False)[
-            "last_hidden_state"
-        ]
-        assert torch.isnan(t5_vec).any() == False, "T5 vector contains NaN values"
-        t5_vec = t5_vec.cpu()
-
-    with torch.autocast(device_type=device.type, dtype=text_encoder2.dtype), torch.no_grad():
-        clip_l_pooler = text_encoder2(l_tokens.to(text_encoder2.device))["pooler_output"]
-        clip_l_pooler = clip_l_pooler.cpu()
-
-    # save prompt cache
-    for item, t5_vec, clip_ctx in zip(batch, t5_vec, clip_l_pooler):
-        save_text_encoder_output_cache_flux_kontext(item, t5_vec, clip_ctx)
+    from musubi_tuner.dataset.cache_io import get_caption_batches
+    for caption_idx, items, prompts in get_caption_batches(batch):
+        caption_prefix = f"caption_{caption_idx}_"
+        t5_tokens = tokenizer1(
+            prompts,
+            max_length=flux_models.T5XXL_MAX_LENGTH,
+            padding="max_length",
+            return_length=False,
+            return_overflowing_tokens=False,
+            truncation=True,
+            return_tensors="pt",
+        )["input_ids"]
+        l_tokens = tokenizer2(prompts, max_length=77, padding="max_length", truncation=True, return_tensors="pt")["input_ids"]
+        with torch.autocast(device_type=device.type, dtype=text_encoder1.dtype), torch.no_grad():
+            t5_vecs = text_encoder1(input_ids=t5_tokens.to(text_encoder1.device), attention_mask=None, output_hidden_states=False)[
+                "last_hidden_state"
+            ]
+            assert torch.isnan(t5_vecs).any() == False, "T5 vector contains NaN values"
+            t5_vecs = t5_vecs.cpu()
+        with torch.autocast(device_type=device.type, dtype=text_encoder2.dtype), torch.no_grad():
+            clip_l_poolers = text_encoder2(l_tokens.to(text_encoder2.device))["pooler_output"]
+            clip_l_poolers = clip_l_poolers.cpu()
+        for item, t5_vec, clip_ctx in zip(items, t5_vecs, clip_l_poolers):
+            save_text_encoder_output_cache_flux_kontext(item, t5_vec, clip_ctx, caption_prefix=caption_prefix)
 
 
 def main():
@@ -105,6 +100,28 @@ def main():
         encode_for_text_encoder,
         accelerator=accelerator,
     )
+    def encode_empty_flux_kontext(item: ItemInfo):
+        nonlocal tokenizer1, text_encoder1, tokenizer2, text_encoder2
+        prompts = [item.caption]
+        t5_tokens = tokenizer1(
+            prompts,
+            max_length=flux_models.T5XXL_MAX_LENGTH,
+            padding="max_length",
+            return_length=False,
+            return_overflowing_tokens=False,
+            truncation=True,
+            return_tensors="pt",
+        )["input_ids"]
+        l_tokens = tokenizer2(prompts, max_length=77, padding="max_length", truncation=True, return_tensors="pt")["input_ids"]
+        with torch.autocast(device_type=device.type, dtype=text_encoder1.dtype), torch.no_grad():
+            t5_vec = text_encoder1(input_ids=t5_tokens.to(text_encoder1.device), attention_mask=None, output_hidden_states=False)[
+                "last_hidden_state"
+            ].cpu()
+        with torch.autocast(device_type=device.type, dtype=text_encoder2.dtype), torch.no_grad():
+            clip_l_pooler = text_encoder2(l_tokens.to(text_encoder2.device))["pooler_output"].cpu()
+        save_text_encoder_output_cache_flux_kontext(item, t5_vec[0], clip_l_pooler[0], caption_prefix="")
+
+    cache_text_encoder_outputs.encode_empty_caption_embeddings(encode_empty_flux_kontext, datasets, accelerator)
     del text_encoder1
     del text_encoder2
 

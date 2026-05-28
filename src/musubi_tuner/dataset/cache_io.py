@@ -264,7 +264,29 @@ def save_latent_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], a
     save_file(sd, item_info.latent_cache_path, metadata=metadata)
 
 
-def save_text_encoder_output_cache(item_info: ItemInfo, embed: torch.Tensor, mask: Optional[torch.Tensor], is_llm: bool):
+def get_empty_caption_cache_path(cache_directory: str) -> str:
+    """Returns the path for the global empty-caption embedding file used by caption dropout."""
+    return os.path.join(cache_directory, "empty_caption_embeddings.safetensors")
+
+
+def get_caption_batches(batch: "list[ItemInfo]"):
+    """Yields (caption_idx, items_for_idx, prompts) for each caption index present in the batch.
+
+    Items that don't have a caption at caption_idx are excluded from that iteration,
+    so different items can have different numbers of captions.
+    """
+    if not batch:
+        return
+    max_captions = max(len(item.captions) for item in batch)
+    for caption_idx in range(max_captions):
+        items_for_idx = [item for item in batch if caption_idx < len(item.captions)]
+        prompts = [item.captions[caption_idx] for item in items_for_idx]
+        yield caption_idx, items_for_idx, prompts
+
+
+def save_text_encoder_output_cache(
+    item_info: ItemInfo, embed: torch.Tensor, mask: Optional[torch.Tensor], is_llm: bool, caption_prefix: str = ""
+):
     """HunyuanVideo architecture"""
     assert embed.dim() == 1 or embed.dim() == 2, (
         f"embed should be 2D tensor (feature, hidden_size) or (hidden_size,), got {embed.shape}"
@@ -274,98 +296,112 @@ def save_text_encoder_output_cache(item_info: ItemInfo, embed: torch.Tensor, mas
     sd = {}
     dtype_str = dtype_to_str(embed.dtype)
     text_encoder_type = "llm" if is_llm else "clipL"
-    sd[f"{text_encoder_type}_{dtype_str}"] = embed.detach().cpu()
+    sd[f"{caption_prefix}{text_encoder_type}_{dtype_str}"] = embed.detach().cpu()
     if mask is not None:
-        sd[f"{text_encoder_type}_mask"] = mask.detach().cpu()
+        sd[f"{caption_prefix}{text_encoder_type}_mask"] = mask.detach().cpu()
 
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_HUNYUAN_VIDEO_FULL)
 
 
-def save_text_encoder_output_cache_wan(item_info: ItemInfo, embed: torch.Tensor):
+def save_text_encoder_output_cache_wan(item_info: ItemInfo, embed: torch.Tensor, caption_prefix: str = ""):
     """Wan architecture. Wan2.1 only has a single text encoder"""
 
     sd = {}
     dtype_str = dtype_to_str(embed.dtype)
     text_encoder_type = "t5"
-    sd[f"varlen_{text_encoder_type}_{dtype_str}"] = embed.detach().cpu()
+    sd[f"{caption_prefix}varlen_{text_encoder_type}_{dtype_str}"] = embed.detach().cpu()
 
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_WAN_FULL)
 
 
 def save_text_encoder_output_cache_framepack(
-    item_info: ItemInfo, llama_vec: torch.Tensor, llama_attention_mask: torch.Tensor, clip_l_pooler: torch.Tensor
+    item_info: ItemInfo,
+    llama_vec: torch.Tensor,
+    llama_attention_mask: torch.Tensor,
+    clip_l_pooler: torch.Tensor,
+    caption_prefix: str = "",
 ):
     """FramePack architecture."""
     sd = {}
     dtype_str = dtype_to_str(llama_vec.dtype)
-    sd[f"llama_vec_{dtype_str}"] = llama_vec.detach().cpu()
-    sd["llama_attention_mask"] = llama_attention_mask.detach().cpu()
+    sd[f"{caption_prefix}llama_vec_{dtype_str}"] = llama_vec.detach().cpu()
+    sd[f"{caption_prefix}llama_attention_mask"] = llama_attention_mask.detach().cpu()
     dtype_str = dtype_to_str(clip_l_pooler.dtype)
-    sd[f"clip_l_pooler_{dtype_str}"] = clip_l_pooler.detach().cpu()
+    sd[f"{caption_prefix}clip_l_pooler_{dtype_str}"] = clip_l_pooler.detach().cpu()
 
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_FRAMEPACK_FULL)
 
 
-def save_text_encoder_output_cache_flux_kontext(item_info: ItemInfo, t5_vec: torch.Tensor, clip_l_pooler: torch.Tensor):
+def save_text_encoder_output_cache_flux_kontext(
+    item_info: ItemInfo, t5_vec: torch.Tensor, clip_l_pooler: torch.Tensor, caption_prefix: str = ""
+):
     """Flux Kontext architecture."""
 
     sd = {}
     dtype_str = dtype_to_str(t5_vec.dtype)
-    sd[f"t5_vec_{dtype_str}"] = t5_vec.detach().cpu()
+    sd[f"{caption_prefix}t5_vec_{dtype_str}"] = t5_vec.detach().cpu()
     dtype_str = dtype_to_str(clip_l_pooler.dtype)
-    sd[f"clip_l_pooler_{dtype_str}"] = clip_l_pooler.detach().cpu()
+    sd[f"{caption_prefix}clip_l_pooler_{dtype_str}"] = clip_l_pooler.detach().cpu()
 
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_FLUX_KONTEXT_FULL)
 
 
-def save_text_encoder_output_cache_flux_2(item_info: ItemInfo, ctx_vec: torch.Tensor, arch_full: str):
+def save_text_encoder_output_cache_flux_2(
+    item_info: ItemInfo, ctx_vec: torch.Tensor, arch_full: str, caption_prefix: str = ""
+):
     """Flux 2 architecture."""
 
     sd = {}
     dtype_str = dtype_to_str(ctx_vec.dtype)
-    sd[f"ctx_vec_{dtype_str}"] = ctx_vec.detach().cpu()
+    sd[f"{caption_prefix}ctx_vec_{dtype_str}"] = ctx_vec.detach().cpu()
 
     save_text_encoder_output_cache_common(item_info, sd, arch_full)
 
 
-def save_text_encoder_output_cache_qwen_image(item_info: ItemInfo, embed: torch.Tensor):
+def save_text_encoder_output_cache_qwen_image(item_info: ItemInfo, embed: torch.Tensor, caption_prefix: str = ""):
     """Qwen-Image architecture."""
     sd = {}
     dtype_str = dtype_to_str(embed.dtype)
-    sd[f"varlen_vl_embed_{dtype_str}"] = embed.detach().cpu()
+    sd[f"{caption_prefix}varlen_vl_embed_{dtype_str}"] = embed.detach().cpu()
 
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_QWEN_IMAGE_FULL)
 
 
 def save_text_encoder_output_cache_kandinsky5(
-    item_info: ItemInfo, text_embeds: torch.Tensor, pooled_embed: torch.Tensor, attention_mask: torch.Tensor
+    item_info: ItemInfo,
+    text_embeds: torch.Tensor,
+    pooled_embed: torch.Tensor,
+    attention_mask: torch.Tensor,
+    caption_prefix: str = "",
 ):
     """Kandinsky 5 architecture."""
     sd = {}
     dtype_str = dtype_to_str(text_embeds.dtype)
-    sd[f"text_embeds_{dtype_str}"] = text_embeds.detach().cpu()
+    sd[f"{caption_prefix}text_embeds_{dtype_str}"] = text_embeds.detach().cpu()
     dtype_str = dtype_to_str(pooled_embed.dtype)
-    sd[f"pooled_embed_{dtype_str}"] = pooled_embed.detach().cpu()
-    sd["attention_mask"] = attention_mask.detach().cpu()
+    sd[f"{caption_prefix}pooled_embed_{dtype_str}"] = pooled_embed.detach().cpu()
+    sd[f"{caption_prefix}attention_mask"] = attention_mask.detach().cpu()
 
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_KANDINSKY5_FULL)
 
 
-def save_text_encoder_output_cache_hunyuan_video_1_5(item_info: ItemInfo, embed: torch.Tensor, byt5_embed: torch.Tensor):
+def save_text_encoder_output_cache_hunyuan_video_1_5(
+    item_info: ItemInfo, embed: torch.Tensor, byt5_embed: torch.Tensor, caption_prefix: str = ""
+):
     """Hunyuan-Video 1.5 architecture."""
     sd = {}
     dtype_str = dtype_to_str(embed.dtype)
-    sd[f"varlen_vl_embed_{dtype_str}"] = embed.detach().cpu()
+    sd[f"{caption_prefix}varlen_vl_embed_{dtype_str}"] = embed.detach().cpu()
     dtype_str = dtype_to_str(byt5_embed.dtype)
-    sd[f"varlen_byt5_embed_{dtype_str}"] = byt5_embed.detach().cpu()
+    sd[f"{caption_prefix}varlen_byt5_embed_{dtype_str}"] = byt5_embed.detach().cpu()
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_HUNYUAN_VIDEO_1_5_FULL)
 
 
-def save_text_encoder_output_cache_z_image(item_info: ItemInfo, embed: torch.Tensor):
+def save_text_encoder_output_cache_z_image(item_info: ItemInfo, embed: torch.Tensor, caption_prefix: str = ""):
     """Z-Image architecture."""
     sd = {}
     dtype_str = dtype_to_str(embed.dtype)
-    sd[f"varlen_llm_embed_{dtype_str}"] = embed.detach().cpu()
+    sd[f"{caption_prefix}varlen_llm_embed_{dtype_str}"] = embed.detach().cpu()
 
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_Z_IMAGE_FULL)
 
@@ -377,10 +413,11 @@ def save_text_encoder_output_cache_common(item_info: ItemInfo, sd: dict[str, tor
             logger.warning(f"{key} tensor has NaN: {item_info.item_key}, replace NaN with 0")
             value[torch.isnan(value)] = 0
 
+    captions_meta = {f"caption{i}": c for i, c in enumerate(item_info.captions)}
     metadata = {
         "architecture": arch_fullname,
-        "caption1": item_info.caption,
         "format_version": "1.0.1",
+        **captions_meta,
     }
 
     if os.path.exists(item_info.text_encoder_output_cache_path):
@@ -392,13 +429,12 @@ def save_text_encoder_output_cache_common(item_info: ItemInfo, sd: dict[str, tor
                     sd[key] = f.get_tensor(key)
 
         assert existing_metadata["architecture"] == metadata["architecture"], "architecture mismatch"
-        if existing_metadata["caption1"] != metadata["caption1"]:
-            logger.warning(f"caption mismatch: existing={existing_metadata['caption1']}, new={metadata['caption1']}, overwrite")
         # TODO verify format_version
 
-        existing_metadata.pop("caption1", None)
-        existing_metadata.pop("format_version", None)
-        metadata.update(existing_metadata)  # copy existing metadata except caption and format_version
+        for k in list(existing_metadata.keys()):
+            if k.startswith("caption") or k == "format_version":
+                existing_metadata.pop(k)
+        metadata.update(existing_metadata)  # copy existing metadata except captions and format_version
     else:
         text_encoder_output_dir = os.path.dirname(item_info.text_encoder_output_cache_path)
         os.makedirs(text_encoder_output_dir, exist_ok=True)

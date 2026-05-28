@@ -46,6 +46,18 @@ num_repeats = 1 # optional, default is 1. Number of times to repeat the dataset.
 
 `image_directory` is the directory containing images. The captions are stored in text files with the same filename as the image, but with the extension specified by `caption_extension` (for example, `image1.jpg` and `image1.txt`).
 
+**Multi-caption support:** Each non-empty line in the `.txt` file is treated as a separate caption. At each training step one caption is selected at random. A file with a single line behaves exactly as before.
+
+```
+# image1.txt — single caption (unchanged behavior)
+A photo of a cat sitting on a windowsill
+
+# image2.txt — three alternative captions
+A cat on a windowsill
+Tabby cat resting near a sunny window
+Domestic cat overlooking the street
+```
+
 `cache_directory` is optional, default is None to use the same directory as the image directory. However, we recommend to set the cache directory to avoid accidental sharing of the cache files between different datasets.
 
 `num_repeats` is also available. It is optional, default is 1 (no repeat). It repeats the images (or videos) that many times to expand the dataset. For example, if `num_repeats = 2` and there are 20 images in the dataset, each image will be duplicated twice (with the same caption) to have a total of 40 images. It is useful to balance the multiple datasets with different sizes.
@@ -113,6 +125,13 @@ JSONL file format for metadata:
 ```json
 {"image_path": "/path/to/image1.jpg", "caption": "A caption for image1"}
 {"image_path": "/path/to/image2.jpg", "caption": "A caption for image2"}
+```
+
+**Multi-caption support:** Use the `captions` key with a list of strings instead of `caption`. At each training step one caption is selected at random. Both keys can be mixed in the same file.
+
+```json
+{"image_path": "/path/to/image1.jpg", "captions": ["First caption", "Second caption", "Third caption"]}
+{"image_path": "/path/to/image2.jpg", "caption": "Old single-caption format still works"}
 ```
 
 For Qwen-Image-Layered training, set `multiple_target = true`. Also, in the metadata JSONL file, for each "image to be trained + segmentation (layer) results" combination, specify the image paths with numbered attributes like `image_path_0`, `image_path_1`, etc.
@@ -235,8 +254,10 @@ JSONL file format for metadata:
 
 ```json
 {"video_path": "/path/to/video1.mp4", "caption": "A caption for video1"}
-{"video_path": "/path/to/video2.mp4", "caption": "A caption for video2"}
+{"video_path": "/path/to/video2.mp4", "captions": ["First caption", "Second caption"]}
 ```
+
+The `captions` key (list) is also supported for multi-caption. See the image dataset section for details.
 
 `video_path` can be a directory containing multiple images.
 
@@ -460,6 +481,79 @@ The dataset configuration with metadata JSONL file is  same as the video dataset
 
 </details>
 
+## Multi-Caption and Caption Dropout
+
+### Multi-Caption
+
+Each image or video can have multiple captions. At every training step one caption is selected at random, which diversifies the text conditioning seen by the model.
+
+**`.txt` files:** each non-empty line is treated as a separate caption.
+
+```
+A tabby cat sitting by a window
+Orange tabby resting on a sunny windowsill
+Domestic cat watching outside
+```
+
+**JSONL metadata:** use the `captions` key with a list of strings.
+
+```json
+{"image_path": "/path/to/img.jpg", "captions": ["Caption A", "Caption B", "Caption C"]}
+```
+
+Both formats are fully compatible with single-caption files (one line / old `caption` key).
+
+**Text encoder cache:** run the cache script once. All N captions for each item are encoded and merged into the same `.safetensors` file. If you add captions later, delete the cache file for that item (or remove the `--skip_existing` flag) and re-run the cache script.
+
+### Caption Dropout
+
+Caption dropout randomly replaces the text embedding with an empty-string embedding during training. This is used to train the model's unconditional (CFG-null) branch.
+
+Set `caption_dropout_rate` in the dataset config (value between 0.0 and 1.0):
+
+```toml
+[[datasets]]
+image_directory = "/path/to/image_dir"
+cache_directory = "/path/to/cache_directory"
+caption_dropout_rate = 0.1  # 10% of steps use an empty caption
+```
+
+When `caption_dropout_rate > 0`, the cache script automatically pre-encodes the empty string `""` once per dataset and saves it as `empty_caption_embeddings.safetensors` in the `cache_directory`. This global file is reused across all images in the dataset, so it only needs to be encoded once.
+
+**Important:** run the text-encoder cache script **before** training. The empty embedding file is created during caching, not during training.
+
+<details>
+<summary>日本語</summary>
+
+### マルチキャプション
+
+各画像・動画に複数のキャプションを設定できます。学習の各ステップでキャプションがランダムに選択されます。
+
+**`.txt`ファイル：** 空でない各行が1つのキャプションになります。
+
+**JSONLメタデータ：** `captions`キーに文字列のリストを使用します。
+
+テキストエンコーダーキャッシュは1回実行するだけで、すべてのキャプションが同一の`.safetensors`ファイルにエンコードされます。
+
+### キャプションドロップアウト
+
+キャプションドロップアウトは、学習中に確率的にテキスト埋め込みを空文字列の埋め込みに置き換えます。モデルの無条件（CFGヌル）ブランチの学習に使用します。
+
+データセット設定で`caption_dropout_rate`を指定します（0.0〜1.0の値）：
+
+```toml
+[[datasets]]
+image_directory = "/path/to/image_dir"
+cache_directory = "/path/to/cache_directory"
+caption_dropout_rate = 0.1  # 10%のステップで空キャプションを使用
+```
+
+`caption_dropout_rate > 0`の場合、キャッシュスクリプトが空文字列`""`を1回エンコードし、`cache_directory`に`empty_caption_embeddings.safetensors`として保存します。このファイルはデータセット内の全画像で共有されます。
+
+**重要：** テキストエンコーダーキャッシュスクリプトを学習前に実行してください。空の埋め込みファイルはキャッシュ時に作成されます。
+
+</details>
+
 ## Architecture-specific Settings / アーキテクチャ固有の設定
 
 The dataset configuration is shared across all architectures. However, some architectures may require additional settings or have specific requirements for the dataset.
@@ -658,6 +752,7 @@ batch_size = 1 # optional, default is 1. This is the default batch size for all 
 num_repeats = 1 # optional, default is 1. Number of times to repeat the dataset. Useful to balance the multiple datasets with different sizes.
 enable_bucket = true # optional, default is false. Enable bucketing for datasets
 bucket_no_upscale = false # optional, default is false. Disable upscaling for bucketing. Ignored if enable_bucket is false
+caption_dropout_rate = 0.0 # optional, default is 0.0. Probability of replacing caption with empty string at each training step
 
 ### Image Dataset
 

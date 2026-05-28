@@ -24,20 +24,17 @@ logging.basicConfig(level=logging.INFO)
 def encode_and_save_batch(
     text_encoder: T5EncoderModel, batch: list[ItemInfo], device: torch.device, accelerator: Optional[accelerate.Accelerator]
 ):
-    prompts = [item.caption for item in batch]
-    # print(prompts)
-
-    # encode prompt
-    with torch.no_grad():
-        if accelerator is not None:
-            with accelerator.autocast():
+    from musubi_tuner.dataset.cache_io import get_caption_batches
+    for caption_idx, items, prompts in get_caption_batches(batch):
+        caption_prefix = f"caption_{caption_idx}_"
+        with torch.no_grad():
+            if accelerator is not None:
+                with accelerator.autocast():
+                    context = text_encoder(prompts, device)
+            else:
                 context = text_encoder(prompts, device)
-        else:
-            context = text_encoder(prompts, device)
-
-    # save prompt cache
-    for item, ctx in zip(batch, context):
-        save_text_encoder_output_cache_wan(item, ctx)
+        for item, ctx in zip(items, context):
+            save_text_encoder_output_cache_wan(item, ctx, caption_prefix=caption_prefix)
 
 
 def main():
@@ -86,6 +83,18 @@ def main():
         encode_for_text_encoder,
         accelerator=accelerator,
     )
+
+    def encode_empty_wan(item: ItemInfo):
+        nonlocal text_encoder
+        with torch.no_grad():
+            if args.fp8_t5:
+                with accelerator.autocast():
+                    context = text_encoder([item.caption], device)
+            else:
+                context = text_encoder([item.caption], device)
+        save_text_encoder_output_cache_wan(item, context[0], caption_prefix="")
+
+    cache_text_encoder_outputs.encode_empty_caption_embeddings(encode_empty_wan, datasets, accelerator)
     del text_encoder
 
     # remove cache files not in dataset

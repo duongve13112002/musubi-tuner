@@ -26,29 +26,24 @@ def encode_and_save_batch(
     batch: list[ItemInfo],
     device: torch.device,
 ):
-    prompts = [item.caption for item in batch]
-
-    # encode prompt
-    # FramePack's encode_prompt_conds only supports single prompt, so we need to encode each prompt separately
-    list_of_llama_vec = []
-    list_of_llama_attention_mask = []
-    list_of_clip_l_pooler = []
-    for prompt in prompts:
-        with torch.autocast(device_type=device.type, dtype=text_encoder1.dtype), torch.no_grad():
-            # llama_vec, clip_l_pooler = hunyuan.encode_prompt_conds(prompts, text_encoder1, text_encoder2, tokenizer1, tokenizer2)
-            llama_vec, clip_l_pooler = hunyuan.encode_prompt_conds(prompt, text_encoder1, text_encoder2, tokenizer1, tokenizer2)
-            llama_vec, llama_attention_mask = crop_or_pad_yield_mask(llama_vec, length=512)
-
-        list_of_llama_vec.append(llama_vec.squeeze(0))
-        list_of_llama_attention_mask.append(llama_attention_mask.squeeze(0))
-        list_of_clip_l_pooler.append(clip_l_pooler.squeeze(0))
-
-    # save prompt cache
-    for item, llama_vec, llama_attention_mask, clip_l_pooler in zip(
-        batch, list_of_llama_vec, list_of_llama_attention_mask, list_of_clip_l_pooler
-    ):
-        # save llama_vec and clip_l_pooler to cache
-        save_text_encoder_output_cache_framepack(item, llama_vec, llama_attention_mask, clip_l_pooler)
+    from musubi_tuner.dataset.cache_io import get_caption_batches
+    # FramePack's encode_prompt_conds only supports single prompt, so we encode each prompt separately
+    for caption_idx, items, prompts in get_caption_batches(batch):
+        caption_prefix = f"caption_{caption_idx}_"
+        list_of_llama_vec = []
+        list_of_llama_attention_mask = []
+        list_of_clip_l_pooler = []
+        for prompt in prompts:
+            with torch.autocast(device_type=device.type, dtype=text_encoder1.dtype), torch.no_grad():
+                llama_vec, clip_l_pooler = hunyuan.encode_prompt_conds(prompt, text_encoder1, text_encoder2, tokenizer1, tokenizer2)
+                llama_vec, llama_attention_mask = crop_or_pad_yield_mask(llama_vec, length=512)
+            list_of_llama_vec.append(llama_vec.squeeze(0))
+            list_of_llama_attention_mask.append(llama_attention_mask.squeeze(0))
+            list_of_clip_l_pooler.append(clip_l_pooler.squeeze(0))
+        for item, llama_vec, llama_attention_mask, clip_l_pooler in zip(
+            items, list_of_llama_vec, list_of_llama_attention_mask, list_of_clip_l_pooler
+        ):
+            save_text_encoder_output_cache_framepack(item, llama_vec, llama_attention_mask, clip_l_pooler, caption_prefix=caption_prefix)
 
 
 def main():
@@ -93,6 +88,15 @@ def main():
         encode_for_text_encoder,
         accelerator=accelerator,
     )
+
+    def encode_empty_fpack(item: ItemInfo):
+        nonlocal tokenizer1, text_encoder1, tokenizer2, text_encoder2
+        with torch.autocast(device_type=device.type, dtype=text_encoder1.dtype), torch.no_grad():
+            llama_vec, clip_l_pooler = hunyuan.encode_prompt_conds(item.caption, text_encoder1, text_encoder2, tokenizer1, tokenizer2)
+            llama_vec, llama_attention_mask = crop_or_pad_yield_mask(llama_vec, length=512)
+        save_text_encoder_output_cache_framepack(item, llama_vec.squeeze(0), llama_attention_mask.squeeze(0), clip_l_pooler.squeeze(0), caption_prefix="")
+
+    cache_text_encoder_outputs.encode_empty_caption_embeddings(encode_empty_fpack, datasets, accelerator)
 
     # remove cache files not in dataset
     cache_text_encoder_outputs.post_process_cache_files(
