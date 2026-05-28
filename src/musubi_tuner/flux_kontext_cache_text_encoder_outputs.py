@@ -79,7 +79,7 @@ def main():
     all_cache_files_for_dataset, all_cache_paths_for_dataset = cache_text_encoder_outputs.prepare_cache_files_and_paths(datasets)
 
     # Load T5 and CLIP text encoders
-    t5_dtype = torch.float8e4m3fn if args.fp8_t5 else torch.bfloat16
+    t5_dtype = torch.float8_e4m3fn if args.fp8_t5 else torch.bfloat16
     tokenizer1, text_encoder1 = flux_utils.load_t5xxl(args.text_encoder1, dtype=t5_dtype, device=device, disable_mmap=True)
     tokenizer2, text_encoder2 = flux_utils.load_clip_l(args.text_encoder2, dtype=torch.bfloat16, device=device, disable_mmap=True)
 

@@ -76,9 +76,9 @@ def encode_empty_caption_embeddings(
         if not getattr(dataset, "caption_dropout_rate", 0):
             continue
         empty_path = get_empty_caption_cache_path(dataset.cache_directory)
-        if os.path.exists(empty_path):
-            logger.info(f"Empty caption embedding already exists: {empty_path}, skipping")
-            continue
+        # No early-exit check: dual-encoder architectures (e.g. HunyuanVideo) call this
+        # function once per encoder, and save_text_encoder_output_cache_common's merge-on-save
+        # correctly accumulates keys from each call into the same file.
         logger.info(f"Encoding empty caption embedding for dataset: {dataset.cache_directory}")
         empty_item = ItemInfo("__empty__", [""], (0, 0))
         empty_item.text_encoder_output_cache_path = empty_path
