@@ -120,6 +120,8 @@ python src/musubi_tuner/wan_cache_latents.py --dataset_config path/to/toml --vae
 
 If you're running low on VRAM, specify `--vae_cache_cpu` to use the CPU for the VAE internal cache, which will reduce VRAM usage somewhat.
 
+To speed up caching with multiple GPUs, see [Multi-GPU cache generation](advanced_config.md#multi-gpu-cache-generation--マルチgpuキャッシュ生成) in the advanced configuration guide.
+
 The control video settings are required for training the Fun-Control model. Please refer to [Dataset Settings](./dataset_config.md#sample-for-video-dataset-with-control-images) for details.
 
 <details>
@@ -148,6 +150,8 @@ python src/musubi_tuner/wan_cache_text_encoder_outputs.py --dataset_config path/
 Adjust `--batch_size` according to your available VRAM.
 
 For systems with limited VRAM (less than ~16GB), use `--fp8_t5` to run the T5 in fp8 mode.
+
+To speed up caching with multiple GPUs, see [Multi-GPU cache generation](advanced_config.md#multi-gpu-cache-generation--マルチgpuキャッシュ生成) in the advanced configuration guide.
 
 <details>
 <summary>日本語</summary>

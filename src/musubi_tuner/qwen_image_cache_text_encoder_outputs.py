@@ -69,7 +69,7 @@ def encode_and_save_batch(
         images = None
 
     for i, item in enumerate(batch):
-        print(
+        logger.debug(
             f"Item {i}: {item.item_key}, prompt: {item.caption}, control images: {[im.shape for im in images[i] if im is not None] if images is not None else None}"
         )
 
@@ -108,8 +108,9 @@ def main():
     args = parser.parse_args()
     qwen_image_utils.resolve_model_version_args(args)
 
-    device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
-    device = torch.device(device)
+    vl_dtype = torch.float8_e4m3fn if args.fp8_vl else torch.bfloat16
+    accelerator = accelerate.Accelerator(mixed_precision="bf16" if args.fp8_vl else "no")
+    device = torch.device(args.device) if (args.device is not None and accelerator.num_processes == 1) else accelerator.device
 
     # Load dataset config
     blueprint_generator = BlueprintGenerator(ConfigSanitizer())
@@ -125,12 +126,6 @@ def main():
     train_dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.dataset_group)
 
     datasets = train_dataset_group.datasets
-
-    # define accelerator for fp8 inference
-    vl_dtype = torch.float8_e4m3fn if args.fp8_vl else torch.bfloat16
-    accelerator = None
-    if args.fp8_vl:
-        accelerator = accelerate.Accelerator(mixed_precision="bf16")
 
     # prepare cache files and paths: all_cache_files_for_dataset = exisiting cache files, all_cache_paths_for_dataset = all cache paths in the dataset
     all_cache_files_for_dataset, all_cache_paths_for_dataset = cache_text_encoder_outputs.prepare_cache_files_and_paths(datasets)
@@ -152,8 +147,8 @@ def main():
     logger.info("Encoding with Qwen2.5-VL")
 
     def encode_for_text_encoder(batch: list[ItemInfo]):
-        nonlocal tokenizer, text_encoder, vl_processor, device, accelerator, args
-        encode_and_save_batch(tokenizer, text_encoder, vl_processor, args.model_version, batch, device, accelerator)
+        nonlocal tokenizer, text_encoder, vl_processor, device
+        encode_and_save_batch(tokenizer, text_encoder, vl_processor, args.model_version, batch, device, accelerator if args.fp8_vl else None)
 
     cache_text_encoder_outputs.process_text_encoder_batches(
         args.num_workers,
@@ -164,12 +159,13 @@ def main():
         all_cache_paths_for_dataset,
         encode_for_text_encoder,
         requires_content=args.is_edit,
+        accelerator=accelerator,
     )
     del text_encoder
 
     # remove cache files not in dataset
     cache_text_encoder_outputs.post_process_cache_files(
-        datasets, all_cache_files_for_dataset, all_cache_paths_for_dataset, args.keep_cache
+        datasets, all_cache_files_for_dataset, all_cache_paths_for_dataset, args.keep_cache, accelerator=accelerator
     )
 
 

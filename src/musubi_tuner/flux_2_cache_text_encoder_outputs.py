@@ -1,5 +1,6 @@
 import argparse
 
+import accelerate
 import torch
 
 from musubi_tuner.dataset import config_utils
@@ -35,8 +36,8 @@ def main():
     args = parser.parse_args()
     model_version_info = flux2_utils.FLUX2_MODEL_INFO[args.model_version]
 
-    device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
-    device = torch.device(device)
+    accelerator = accelerate.Accelerator()
+    device = torch.device(args.device) if (args.device is not None and accelerator.num_processes == 1) else accelerator.device
 
     # Load dataset config
     blueprint_generator = BlueprintGenerator(ConfigSanitizer())
@@ -71,12 +72,13 @@ def main():
         all_cache_files_for_dataset,
         all_cache_paths_for_dataset,
         encode_for_text_encoder,
+        accelerator=accelerator,
     )
     del text_embedder
 
     # remove cache files not in dataset
     cache_text_encoder_outputs.post_process_cache_files(
-        datasets, all_cache_files_for_dataset, all_cache_paths_for_dataset, args.keep_cache
+        datasets, all_cache_files_for_dataset, all_cache_paths_for_dataset, args.keep_cache, accelerator=accelerator
     )
 
 

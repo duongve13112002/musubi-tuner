@@ -1,6 +1,7 @@
 import logging
 from typing import List
 
+import accelerate
 import numpy as np
 import torch
 
@@ -100,8 +101,8 @@ def main():
     )
     args = parser.parse_args()
 
-    device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
-    device = torch.device(device)
+    accelerator = accelerate.Accelerator()
+    device = torch.device(args.device) if (args.device is not None and accelerator.num_processes == 1) else accelerator.device
 
     blueprint_generator = BlueprintGenerator(ConfigSanitizer())
     logger.info(f"Load dataset config from {args.dataset_config}")
@@ -137,7 +138,7 @@ def main():
     def encode(batch: List[ItemInfo]):
         encode_and_save_batch(vae, batch)
 
-    cache_latents.encode_datasets(datasets, encode, args)
+    cache_latents.encode_datasets(datasets, encode, args, accelerator=accelerator)
 
 
 if __name__ == "__main__":

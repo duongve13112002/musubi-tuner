@@ -17,6 +17,7 @@
 - [Specify time step range for training](#specify-time-step-range-for-training--学習時のタイムステップ範囲の指定)
 - [Timestep Bucketing for Uniform Sampling](#timestep-bucketing-for-uniform-sampling--均一なサンプリングのためのtimestep-bucketing)
 - [Schedule Free Optimizer](#schedule-free-optimizer--スケジュールフリーオプティマイザ)
+- [Multi-GPU cache generation](#multi-gpu-cache-generation--マルチgpuキャッシュ生成)
 
 [Post-Hoc EMA merging for LoRA](tools.md#lora-post-hoc-ema-merging--loraのpost-hoc-emaマージ) is described in the [Tools](tools.md) document.
 
@@ -827,5 +828,124 @@ powerを1未満に設定した Polynomial Scheduler に似ていますが、Rex�
 ```bash
 --lr_scheduler rex --lr_scheduler_args "rex_alpha=0.1" "rex_beta=0.9"
 ```
+
+## Multi-GPU cache generation / マルチGPUキャッシュ生成
+
+All cache scripts (latent cache and text encoder output cache) support multi-GPU execution via `accelerate launch --num_processes N`. Each GPU processes a disjoint shard of the dataset, reducing total cache generation time proportionally.
+
+### How it works / 仕組み
+
+Items in the dataset are assigned to GPUs by their global index: `item_index % num_processes == process_index`. Every GPU iterates the full dataset to track which cache files are valid, but only encodes and writes the items assigned to it. After all GPUs finish writing, the main process (GPU 0) removes any stale cache files.
+
+This design guarantees:
+- No item is missed or encoded twice.
+- Stale cache cleanup is always correct, regardless of how items are distributed.
+- A synchronization barrier (`wait_for_everyone()`) ensures all writes complete before any file is removed.
+
+### Usage / 使い方
+
+Replace `python` with `accelerate launch --num_processes N` for any cache script. No other arguments need to change.
+
+**Latent cache (HunyuanVideo example):**
+
+```bash
+accelerate launch --num_processes 4 src/musubi_tuner/cache_latents.py \
+  --dataset_config path/to/toml \
+  --vae path/to/vae/pytorch_model.pt \
+  --vae_chunk_size 32 --vae_tiling
+```
+
+**Text encoder cache (HunyuanVideo example):**
+
+```bash
+accelerate launch --num_processes 4 src/musubi_tuner/cache_text_encoder_outputs.py \
+  --dataset_config path/to/toml \
+  --text_encoder1 path/to/text_encoder \
+  --text_encoder2 path/to/text_encoder_2 \
+  --batch_size 16
+```
+
+**Wan example:**
+
+```bash
+accelerate launch --num_processes 4 src/musubi_tuner/wan_cache_latents.py \
+  --dataset_config path/to/toml \
+  --vae path/to/wan_vae.safetensors
+
+accelerate launch --num_processes 4 src/musubi_tuner/wan_cache_text_encoder_outputs.py \
+  --dataset_config path/to/toml \
+  --t5 path/to/models_t5_umt5-xxl-enc-bf16.pth \
+  --batch_size 16
+```
+
+The same pattern applies to all other architecture-specific cache scripts (`fpack_cache_latents.py`, `hv_1_5_cache_latents.py`, `flux_2_cache_latents.py`, `flux_kontext_cache_latents.py`, `qwen_image_cache_latents.py`, `kandinsky5_cache_latents.py`, `zimage_cache_latents.py`, and their corresponding text encoder scripts).
+
+### Notes / 注意事項
+
+- Progress bar (`tqdm`) is displayed only on the main process (GPU 0) to avoid duplicate output.
+- When using `--skip_existing`, each GPU independently skips already-cached items in its shard.
+- Stale cache file deletion only runs on GPU 0 after a synchronization barrier; non-main processes exit the cleanup step silently.
+- Multi-GPU cache is independent of multi-GPU training. You can cache with N GPUs and train with a different number.
+
+<details>
+<summary>日本語</summary>
+
+すべてのキャッシュスクリプト（latentキャッシュおよびテキストエンコーダー出力キャッシュ）は、`accelerate launch --num_processes N` によるマルチGPU実行をサポートしています。各GPUがデータセットの互いに重複しないシャードを処理するため、キャッシュ生成の総時間をGPU数に比例して短縮できます。
+
+### 仕組み
+
+データセット内のアイテムは、グローバルインデックスによってGPUに割り当てられます（`item_index % num_processes == process_index`）。すべてのGPUがデータセット全体を走査して有効なキャッシュファイルを追跡しますが、エンコードして書き込むのは割り当てられたアイテムのみです。すべてのGPUが書き込みを完了した後、メインプロセス（GPU 0）が古いキャッシュファイルを削除します。
+
+この設計により、以下が保証されます。
+- アイテムの漏れや二重エンコードが発生しない。
+- アイテムの分散方法に関わらず、古いキャッシュのクリーンアップが常に正確に行われる。
+- 同期バリア（`wait_for_everyone()`）により、ファイルが削除される前にすべての書き込みが完了することが保証される。
+
+### 使い方
+
+キャッシュスクリプトの `python` を `accelerate launch --num_processes N` に置き換えるだけです。その他の引数は変更不要です。
+
+**Latentキャッシュ（HunyuanVideoの例）:**
+
+```bash
+accelerate launch --num_processes 4 src/musubi_tuner/cache_latents.py \
+  --dataset_config path/to/toml \
+  --vae path/to/vae/pytorch_model.pt \
+  --vae_chunk_size 32 --vae_tiling
+```
+
+**テキストエンコーダーキャッシュ（HunyuanVideoの例）:**
+
+```bash
+accelerate launch --num_processes 4 src/musubi_tuner/cache_text_encoder_outputs.py \
+  --dataset_config path/to/toml \
+  --text_encoder1 path/to/text_encoder \
+  --text_encoder2 path/to/text_encoder_2 \
+  --batch_size 16
+```
+
+**Wanの例:**
+
+```bash
+accelerate launch --num_processes 4 src/musubi_tuner/wan_cache_latents.py \
+  --dataset_config path/to/toml \
+  --vae path/to/wan_vae.safetensors
+
+accelerate launch --num_processes 4 src/musubi_tuner/wan_cache_text_encoder_outputs.py \
+  --dataset_config path/to/toml \
+  --t5 path/to/models_t5_umt5-xxl-enc-bf16.pth \
+  --batch_size 16
+```
+
+同様のパターンが他のすべてのアーキテクチャ固有のキャッシュスクリプトにも適用されます（`fpack_cache_latents.py`、`hv_1_5_cache_latents.py`、`flux_2_cache_latents.py`、`flux_kontext_cache_latents.py`、`qwen_image_cache_latents.py`、`kandinsky5_cache_latents.py`、`zimage_cache_latents.py`、およびそれらに対応するテキストエンコーダースクリプト）。
+
+### 注意事項
+
+- プログレスバー（`tqdm`）はメインプロセス（GPU 0）のみに表示され、重複した出力を避けます。
+- `--skip_existing`を使用する場合、各GPUは自身のシャード内でキャッシュ済みのアイテムを独立してスキップします。
+- 古いキャッシュファイルの削除は、同期バリアの後にGPU 0のみが実行します。メインプロセス以外のプロセスは、クリーンアップステップを無音で終了します。
+- マルチGPUキャッシュはマルチGPUトレーニングとは独立しています。N個のGPUでキャッシュし、異なる数のGPUでトレーニングすることができます。
+
+</details>
 
 </details>

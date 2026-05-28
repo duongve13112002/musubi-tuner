@@ -2,8 +2,9 @@ import argparse
 import logging
 import math
 import os
-from typing import List
+from typing import List, Optional
 
+import accelerate
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -322,15 +323,15 @@ def encode_and_save_batch_one_frame(
         # Target latents for this section (ground truth)
         target_latents = latents[b, :, -1:]  # C, 1, H, W
 
-        print(f"Saving cache for item {item.item_key} at {item.latent_cache_path}. no_post: {item.fp_1f_no_post}")
-        print(f"  Clean latent indices: {clean_latent_indices}, latent index: {latent_index}")
-        print(f"  Clean latents: {clean_latents.shape}, target latents: {target_latents.shape}")
-        print(f"  Clean latents 2x indices: {clean_latent_2x_indices}, clean latents 4x indices: {clean_latent_4x_indices}")
-        print(
+        logger.debug(f"Saving cache for item {item.item_key} at {item.latent_cache_path}. no_post: {item.fp_1f_no_post}")
+        logger.debug(f"  Clean latent indices: {clean_latent_indices}, latent index: {latent_index}")
+        logger.debug(f"  Clean latents: {clean_latents.shape}, target latents: {target_latents.shape}")
+        logger.debug(f"  Clean latents 2x indices: {clean_latent_2x_indices}, clean latents 4x indices: {clean_latent_4x_indices}")
+        logger.debug(
             f"  Clean latents 2x: {clean_latents_2x.shape if clean_latents_2x is not None else 'None'}, "
             f"Clean latents 4x: {clean_latents_4x.shape if clean_latents_4x is not None else 'None'}"
         )
-        print(f"  Image embeddings: {image_embeddings[b].shape}")
+        logger.debug(f"  Image embeddings: {image_embeddings[b].shape}")
 
         # save cache (file path is inside item.latent_cache_path pattern), remove batch dim
         save_latent_cache_framepack(
@@ -389,8 +390,8 @@ def main():
     #     args.batch_size = 1
     #     logger.info("Batch size is set to 1 for FramePack.")
 
-    device = args.device if hasattr(args, "device") and args.device else ("cuda" if torch.cuda.is_available() else "cpu")
-    device = torch.device(device)
+    accelerator = accelerate.Accelerator()
+    device = torch.device(args.device) if (hasattr(args, "device") and args.device and accelerator.num_processes == 1) else accelerator.device
 
     # Load dataset config
     blueprint_generator = BlueprintGenerator(ConfigSanitizer())
@@ -426,8 +427,7 @@ def main():
             vae, feature_extractor, image_encoder, batch, args.f1, args.one_frame, args.one_frame_no_2x, args.one_frame_no_4x
         )
 
-    # reuse core loop from cache_latents with no change
-    encode_datasets_framepack(datasets, encode, args)
+    encode_datasets_framepack(datasets, encode, args, accelerator=accelerator)
 
 
 def append_section_idx_to_latent_cache_path(latent_cache_path: str, section_idx: int) -> str:
@@ -436,12 +436,22 @@ def append_section_idx_to_latent_cache_path(latent_cache_path: str, section_idx:
     return "_".join(tokens)
 
 
-def encode_datasets_framepack(datasets: list[BaseDataset], encode: callable, args: argparse.Namespace):
+def encode_datasets_framepack(
+    datasets: list[BaseDataset],
+    encode: callable,
+    args: argparse.Namespace,
+    accelerator: Optional[accelerate.Accelerator] = None,
+):
+    num_processes = accelerator.num_processes if accelerator is not None else 1
+    process_index = accelerator.process_index if accelerator is not None else 0
+    is_main_process = accelerator.is_main_process if accelerator is not None else True
+
     num_workers = args.num_workers if args.num_workers is not None else max(1, os.cpu_count() - 1)
-    for i, dataset in enumerate(datasets):
-        logger.info(f"Encoding dataset [{i}]")
+    for dataset_idx, dataset in enumerate(datasets):
+        logger.info(f"Encoding dataset [{dataset_idx}]")
         all_latent_cache_paths = []
-        for _, batch in tqdm(dataset.retrieve_latent_cache_batches(num_workers)):
+        global_item_index = 0
+        for _, batch in tqdm(dataset.retrieve_latent_cache_batches(num_workers), disable=not is_main_process):
             batch: list[ItemInfo] = batch  # type: ignore
 
             # make sure content has 3 channels
@@ -452,12 +462,12 @@ def encode_datasets_framepack(datasets: list[BaseDataset], encode: callable, arg
                 else:
                     item.content = [img[..., :3] if img.shape[-1] == 4 else img for img in item.content]
 
+            # Collect ALL section paths on every process for correct cleanup tracking.
             # latent_cache_path is "{basename}_{w:04d}x{h:04d}_{self.architecture}.safetensors"
-            # For video dataset,we expand it to "{basename}_{section_idx:04d}_{w:04d}x{h:04d}_{self.architecture}.safetensors"
-            filtered_batch = []
+            # For video dataset, expand to "{basename}_{section_idx:04d}_{w:04d}x{h:04d}_{self.architecture}.safetensors"
+            items_missing_sections = []
             for item in batch:
                 if item.frame_count is None:
-                    # image dataset
                     all_latent_cache_paths.append(item.latent_cache_path)
                     all_existing = os.path.exists(item.latent_cache_path)
                 else:
@@ -469,32 +479,45 @@ def encode_datasets_framepack(datasets: list[BaseDataset], encode: callable, arg
                         all_latent_cache_paths.append(p)
                         all_existing = all_existing and os.path.exists(p)
 
-                if not all_existing:  # if any section cache is missing
-                    filtered_batch.append(item)
+                if not all_existing:
+                    items_missing_sections.append(item)
+
+            # shard: each process encodes only its assigned items from the original batch
+            if num_processes > 1:
+                shard_batch = [item for j, item in enumerate(batch) if (global_item_index + j) % num_processes == process_index]
+            else:
+                shard_batch = batch
+            global_item_index += len(batch)
 
             if args.skip_existing:
-                if len(filtered_batch) == 0:  # all sections exist
-                    logger.info(f"All sections exist for {batch[0].item_key}, skipping")
+                # only encode items assigned to this shard that still have missing sections
+                missing_set = set(id(item) for item in items_missing_sections)
+                shard_batch = [item for item in shard_batch if id(item) in missing_set]
+                if len(shard_batch) == 0:
                     continue
-                batch = filtered_batch  # update batch to only missing sections
 
-            bs = args.batch_size if args.batch_size is not None else len(batch)
-            for i in range(0, len(batch), bs):
-                encode(batch[i : i + bs])
+            bs = args.batch_size if args.batch_size is not None else len(shard_batch)
+            for j in range(0, len(shard_batch), bs):
+                encode(shard_batch[j : j + bs])
 
         # normalize paths
         all_latent_cache_paths = [os.path.normpath(p) for p in all_latent_cache_paths]
         all_latent_cache_paths = set(all_latent_cache_paths)
 
-        # remove old cache files not in the dataset
-        all_cache_files = dataset.get_all_latent_cache_files()
-        for cache_file in all_cache_files:
-            if os.path.normpath(cache_file) not in all_latent_cache_paths:
-                if args.keep_cache:
-                    logger.info(f"Keep cache file not in the dataset: {cache_file}")
-                else:
-                    os.remove(cache_file)
-                    logger.info(f"Removed old cache file: {cache_file}")
+        # barrier: ensure all processes finish writing before any cleanup
+        if accelerator is not None:
+            accelerator.wait_for_everyone()
+
+        # only the main process removes stale cache files
+        if is_main_process:
+            all_cache_files = dataset.get_all_latent_cache_files()
+            for cache_file in all_cache_files:
+                if os.path.normpath(cache_file) not in all_latent_cache_paths:
+                    if args.keep_cache:
+                        logger.info(f"Keep cache file not in the dataset: {cache_file}")
+                    else:
+                        os.remove(cache_file)
+                        logger.info(f"Removed old cache file: {cache_file}")
 
 
 if __name__ == "__main__":

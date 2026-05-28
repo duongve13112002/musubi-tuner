@@ -1,6 +1,7 @@
 import logging
 from typing import List
 
+import accelerate
 import numpy as np
 import torch
 
@@ -69,7 +70,7 @@ def encode_and_save_batch(ae: flux_models.AutoEncoder, batch: List[ItemInfo]):
         target_latent = latents[b]  # C, H, W. Target latents for this image (ground truth)
         control_latent = control_latents[b]  # C, H, W
 
-        print(
+        logger.debug(
             f"Saving cache for item {item.item_key} at {item.latent_cache_path}. control latents shape: {control_latent.shape}, target latents shape: {target_latent.shape}"
         )
 
@@ -99,8 +100,8 @@ def main():
     if args.vae_dtype is not None:
         raise ValueError("VAE dtype is not supported in FLUX.1 Kontext.")
 
-    device = args.device if hasattr(args, "device") and args.device else ("cuda" if torch.cuda.is_available() else "cpu")
-    device = torch.device(device)
+    accelerator = accelerate.Accelerator()
+    device = torch.device(args.device) if (hasattr(args, "device") and args.device and accelerator.num_processes == 1) else accelerator.device
 
     # Load dataset config
     blueprint_generator = BlueprintGenerator(ConfigSanitizer())
@@ -127,8 +128,7 @@ def main():
     def encode(batch: List[ItemInfo]):
         encode_and_save_batch(ae, batch)
 
-    # reuse core loop from cache_latents with no change
-    cache_latents.encode_datasets(datasets, encode, args)
+    cache_latents.encode_datasets(datasets, encode, args, accelerator=accelerator)
 
 
 if __name__ == "__main__":

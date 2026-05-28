@@ -81,8 +81,9 @@ def main():
 
     args = parser.parse_args()
 
-    device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
-    device = torch.device(device)
+    vl_dtype = torch.float8_e4m3fn if args.fp8_vl else torch.bfloat16
+    accelerator = accelerate.Accelerator(mixed_precision="bf16" if args.fp8_vl else "no")
+    device = torch.device(args.device) if (args.device is not None and accelerator.num_processes == 1) else accelerator.device
 
     # Load dataset config
     blueprint_generator = BlueprintGenerator(ConfigSanitizer())
@@ -92,12 +93,6 @@ def main():
     train_dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.dataset_group)
 
     datasets = train_dataset_group.datasets
-
-    # define accelerator for fp8 inference
-    vl_dtype = torch.float8_e4m3fn if args.fp8_vl else torch.bfloat16
-    accelerator = None
-    if args.fp8_vl:
-        accelerator = accelerate.Accelerator(mixed_precision="bf16")
 
     # prepare cache files and paths: all_cache_files_for_dataset = existing cache files, all_cache_paths_for_dataset = all cache paths in the dataset
     all_cache_files_for_dataset, all_cache_paths_for_dataset = cache_text_encoder_outputs.prepare_cache_files_and_paths(datasets)
@@ -118,8 +113,8 @@ def main():
     logger.info("Encoding with Qwen2.5-VL and BYT5")
 
     def encode_for_text_encoders(batch: list[ItemInfo]):
-        nonlocal tokenizer_vlm, text_encoder_vlm, tokenizer_byt5, text_encoder_byt5, device, accelerator
-        encode_and_save_batch(tokenizer_vlm, text_encoder_vlm, tokenizer_byt5, text_encoder_byt5, batch, device, accelerator)
+        nonlocal tokenizer_vlm, text_encoder_vlm, tokenizer_byt5, text_encoder_byt5, device
+        encode_and_save_batch(tokenizer_vlm, text_encoder_vlm, tokenizer_byt5, text_encoder_byt5, batch, device, accelerator if args.fp8_vl else None)
 
     cache_text_encoder_outputs.process_text_encoder_batches(
         args.num_workers,
@@ -129,12 +124,13 @@ def main():
         all_cache_files_for_dataset,
         all_cache_paths_for_dataset,
         encode_for_text_encoders,
+        accelerator=accelerator,
     )
     del text_encoder_vlm, text_encoder_byt5
 
     # remove cache files not in dataset
     cache_text_encoder_outputs.post_process_cache_files(
-        datasets, all_cache_files_for_dataset, all_cache_paths_for_dataset, args.keep_cache
+        datasets, all_cache_files_for_dataset, all_cache_paths_for_dataset, args.keep_cache, accelerator=accelerator
     )
 
 

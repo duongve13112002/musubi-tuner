@@ -1,6 +1,7 @@
 import argparse
 from typing import Optional
 
+import accelerate
 import torch
 
 from musubi_tuner.dataset import config_utils
@@ -230,8 +231,8 @@ def main():
     if args.clip is not None:
         args.i2v = True
 
-    device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
-    device = torch.device(device)
+    accelerator = accelerate.Accelerator()
+    device = torch.device(args.device) if (args.device is not None and accelerator.num_processes == 1) else accelerator.device
 
     # Load dataset config
     blueprint_generator = BlueprintGenerator(ConfigSanitizer())
@@ -267,7 +268,7 @@ def main():
     def encode(one_batch: list[ItemInfo]):
         encode_and_save_batch(vae, clip, args.i2v, one_batch, args.one_frame)
 
-    cache_latents.encode_datasets(datasets, encode, args)
+    cache_latents.encode_datasets(datasets, encode, args, accelerator=accelerator)
 
 
 def wan_setup_parser(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:

@@ -79,46 +79,68 @@ def process_text_encoder_batches(
     all_cache_paths_for_dataset: list[set],
     encode: callable,
     requires_content: Optional[bool] = False,
+    accelerator: Optional[accelerate.Accelerator] = None,
 ):
     """
     Architecture independent processing of text encoder batches.
     """
+    num_processes = accelerator.num_processes if accelerator is not None else 1
+    process_index = accelerator.process_index if accelerator is not None else 0
+    is_main_process = accelerator.is_main_process if accelerator is not None else True
 
     num_workers = num_workers if num_workers is not None else max(1, os.cpu_count() - 1)
-    for i, dataset in enumerate(datasets):
-        logger.info(f"Encoding dataset [{i}]")
-        all_cache_files = all_cache_files_for_dataset[i]
-        all_cache_paths = all_cache_paths_for_dataset[i]
+    for dataset_idx, dataset in enumerate(datasets):
+        logger.info(f"Encoding dataset [{dataset_idx}]")
+        all_cache_files = all_cache_files_for_dataset[dataset_idx]
+        all_cache_paths = all_cache_paths_for_dataset[dataset_idx]
 
         if not requires_content:
             batches = dataset.retrieve_text_encoder_output_cache_batches(num_workers)  # return captions only
         else:
             batches = dataset.retrieve_latent_cache_batches(num_workers)  # return captions and images/videos
 
-        for batch in tqdm(batches):
-            # update cache files (it's ok if we update it multiple times)
+        global_item_index = 0
+        for batch in tqdm(batches, disable=not is_main_process):
+            # update cache paths on every process for correct cleanup tracking
             if requires_content:
                 batch = batch[1]  # batch is (key, items), so use items
             all_cache_paths.update([os.path.normpath(item.text_encoder_output_cache_path) for item in batch])
 
+            # shard: each process encodes only its assigned items
+            if num_processes > 1:
+                shard_batch = [item for j, item in enumerate(batch) if (global_item_index + j) % num_processes == process_index]
+            else:
+                shard_batch = batch
+            global_item_index += len(batch)
+
             # skip existing cache files
             if skip_existing:
-                filtered_batch = [
-                    item for item in batch if os.path.normpath(item.text_encoder_output_cache_path) not in all_cache_files
+                shard_batch = [
+                    item for item in shard_batch if os.path.normpath(item.text_encoder_output_cache_path) not in all_cache_files
                 ]
-                # print(f"Filtered {len(batch) - len(filtered_batch)} existing cache files")
-                if len(filtered_batch) == 0:
+                if len(shard_batch) == 0:
                     continue
-                batch = filtered_batch
 
-            bs = batch_size if batch_size is not None else len(batch)
-            for i in range(0, len(batch), bs):
-                encode(batch[i : i + bs])
+            bs = batch_size if batch_size is not None else len(shard_batch)
+            for j in range(0, len(shard_batch), bs):
+                encode(shard_batch[j : j + bs])
 
 
 def post_process_cache_files(
-    datasets: list[BaseDataset], all_cache_files_for_dataset: list[set], all_cache_paths_for_dataset: list[set], keep_cache: bool
+    datasets: list[BaseDataset],
+    all_cache_files_for_dataset: list[set],
+    all_cache_paths_for_dataset: list[set],
+    keep_cache: bool,
+    accelerator: Optional[accelerate.Accelerator] = None,
 ):
+    # barrier: ensure all processes finish writing before any cleanup
+    if accelerator is not None:
+        accelerator.wait_for_everyone()
+
+    # only the main process removes stale cache files
+    if accelerator is not None and not accelerator.is_main_process:
+        return
+
     for i, dataset in enumerate(datasets):
         all_cache_files = all_cache_files_for_dataset[i]
         all_cache_paths = all_cache_paths_for_dataset[i]
@@ -137,8 +159,8 @@ def main():
 
     args = parser.parse_args()
 
-    device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
-    device = torch.device(device)
+    accelerator = accelerate.Accelerator(mixed_precision="fp16" if args.fp8_llm else "no")
+    device = torch.device(args.device) if (args.device is not None and accelerator.num_processes == 1) else accelerator.device
 
     # Load dataset config
     blueprint_generator = BlueprintGenerator(ConfigSanitizer())
@@ -148,11 +170,6 @@ def main():
     train_dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.dataset_group)
 
     datasets = train_dataset_group.datasets
-
-    # define accelerator for fp8 inference
-    accelerator = None
-    if args.fp8_llm:
-        accelerator = accelerate.Accelerator(mixed_precision="fp16")
 
     # prepare cache files and paths: all_cache_files_for_dataset = exisiting cache files, all_cache_paths_for_dataset = all cache paths in the dataset
     all_cache_files_for_dataset, all_cache_paths_for_dataset = prepare_cache_files_and_paths(datasets)
@@ -178,6 +195,7 @@ def main():
         all_cache_files_for_dataset,
         all_cache_paths_for_dataset,
         encode_for_text_encoder_1,
+        accelerator=accelerator,
     )
     del text_encoder_1
 
@@ -201,11 +219,12 @@ def main():
         all_cache_files_for_dataset,
         all_cache_paths_for_dataset,
         encode_for_text_encoder_2,
+        accelerator=accelerator,
     )
     del text_encoder_2
 
     # remove cache files not in dataset
-    post_process_cache_files(datasets, all_cache_files_for_dataset, all_cache_paths_for_dataset, args.keep_cache)
+    post_process_cache_files(datasets, all_cache_files_for_dataset, all_cache_paths_for_dataset, args.keep_cache, accelerator=accelerator)
 
 
 def setup_parser_common():

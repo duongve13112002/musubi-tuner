@@ -46,8 +46,10 @@ def main():
 
     args = parser.parse_args()
 
-    device = args.device if args.device is not None else "cuda" if torch.cuda.is_available() else "cpu"
-    device = torch.device(device)
+    config = wan_t2v_14B.t2v_14B  # all Wan2.1 models have the same config for t5
+    mixed_precision = ("bf16" if config.t5_dtype == torch.bfloat16 else "fp16") if args.fp8_t5 else "no"
+    accelerator = accelerate.Accelerator(mixed_precision=mixed_precision)
+    device = torch.device(args.device) if (args.device is not None and accelerator.num_processes == 1) else accelerator.device
 
     # Load dataset config
     blueprint_generator = BlueprintGenerator(ConfigSanitizer())
@@ -57,12 +59,6 @@ def main():
     train_dataset_group = config_utils.generate_dataset_group_by_blueprint(blueprint.dataset_group)
 
     datasets = train_dataset_group.datasets
-
-    # define accelerator for fp8 inference
-    config = wan_t2v_14B.t2v_14B  # all Wan2.1 models have the same config for t5
-    accelerator = None
-    if args.fp8_t5:
-        accelerator = accelerate.Accelerator(mixed_precision="bf16" if config.t5_dtype == torch.bfloat16 else "fp16")
 
     # prepare cache files and paths: all_cache_files_for_dataset = exisiting cache files, all_cache_paths_for_dataset = all cache paths in the dataset
     all_cache_files_for_dataset, all_cache_paths_for_dataset = cache_text_encoder_outputs.prepare_cache_files_and_paths(datasets)
@@ -77,8 +73,8 @@ def main():
     logger.info("Encoding with T5")
 
     def encode_for_text_encoder(batch: list[ItemInfo]):
-        nonlocal text_encoder, device, accelerator
-        encode_and_save_batch(text_encoder, batch, device, accelerator)
+        nonlocal text_encoder, device
+        encode_and_save_batch(text_encoder, batch, device, accelerator if args.fp8_t5 else None)
 
     cache_text_encoder_outputs.process_text_encoder_batches(
         args.num_workers,
@@ -88,12 +84,13 @@ def main():
         all_cache_files_for_dataset,
         all_cache_paths_for_dataset,
         encode_for_text_encoder,
+        accelerator=accelerator,
     )
     del text_encoder
 
     # remove cache files not in dataset
     cache_text_encoder_outputs.post_process_cache_files(
-        datasets, all_cache_files_for_dataset, all_cache_paths_for_dataset, args.keep_cache
+        datasets, all_cache_files_for_dataset, all_cache_paths_for_dataset, args.keep_cache, accelerator=accelerator
     )
 
 

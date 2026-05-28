@@ -109,6 +109,8 @@ uv run --extra cu124 src/musubi_tuner/cache_latents.py --dataset_config path/to/
 
 For additional options, use `python src/musubi_tuner/cache_latents.py --help`.
 
+To speed up caching with multiple GPUs, see [Multi-GPU cache generation](advanced_config.md#multi-gpu-cache-generation--マルチgpuキャッシュ生成) in the advanced configuration guide.
+
 If you're running low on VRAM, reduce `--vae_spatial_tile_sample_min_size` to around 128 and lower the `--batch_size` (`--vae_spatial_tile_sample_min_size` may not exist in architectures other than HunyuanVideo, see the documentation for each architecture).
 
 If you are using an AMD GPU and/or are experiencing slow latent caching, consider trying `--disable_cudnn_backend`. For some details, see [this pull request](https://github.com/kohya-ss/musubi-tuner/pull/592).
@@ -161,6 +163,8 @@ uv run --extra cu124 src/musubi_tuner/cache_text_encoder_outputs.py --dataset_co
 ```
 
 For additional options, use `python src/musubi_tuner/cache_text_encoder_outputs.py --help`.
+
+To speed up caching with multiple GPUs, see [Multi-GPU cache generation](advanced_config.md#multi-gpu-cache-generation--マルチgpuキャッシュ生成) in the advanced configuration guide.
 
 Adjust `--batch_size` according to your available VRAM.
 
