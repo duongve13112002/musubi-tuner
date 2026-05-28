@@ -252,13 +252,20 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
 - Uses `flux_2_train.py`.
 - Requires the same `--vae`, `--text_encoder`, and `--model_version` arguments as LoRA training.
 - **Recommended: use `klein-base-4b` or `klein-base-9b`** for training. The distilled variants (`dev`, `klein-4b`, `klein-9b`) are intended for inference and may produce poor training results.
+- All five model versions (`dev`, `klein-4b`, `klein-9b`, `klein-base-4b`, `klein-base-9b`) are supported via `--model_version`.
 - `--full_bf16` loads and updates the DiT in bfloat16, halving memory usage compared to the default float32. Requires `--mixed_precision bf16`.
-- All memory options from LoRA training are available: `--blocks_to_swap`, `--gradient_checkpointing`, `--gradient_checkpointing_cpu_offload`.
-- `--fp8_base` and `--fp8_scaled` are **not supported** for full fine-tuning (automatically disabled with a warning).
+- All memory-saving options from LoRA training are available: `--blocks_to_swap`, `--gradient_checkpointing`, `--gradient_checkpointing_cpu_offload`.
+- `--fp8_base` and `--fp8_scaled` are **not supported** for full fine-tuning (automatically disabled with a warning). FP8 is a quantisation technique incompatible with gradient updates.
 - `--fused_backward_pass` reduces memory for Adafactor optimizer (fuses backward + optimizer step).
 - `--mem_eff_save` saves checkpoints with reduced peak memory.
 - `--block_swap_optimizer_patch_params` patches optimizer parameter devices when using `--blocks_to_swap` with AdamW/Adafactor. Not needed with `--fused_backward_pass`.
 - Control images (reference images) are supported in the same way as LoRA training.
+- Logging (`--wandb_run_name`, `--log_tracker_name`, `--log_tracker_config`), HuggingFace upload (`--huggingface_repo_id`), state saving (`--save_state`, `--save_state_on_train_end`), and resume from checkpoint (`--resume`) all work identically to LoRA training.
+- On Ampere or newer GPUs, `--cuda_allow_tf32` enables TF32 for faster matrix multiply, and `--cuda_cudnn_benchmark` enables the cuDNN auto-tuner.
+
+**Multi-GPU**: Multi-GPU training via DDP is supported. Use `accelerate launch` with `--num_processes N`. The data loader and gradient sync are handled automatically by HuggingFace Accelerate, identical to LoRA training.
+
+**DeepSpeed**: Not supported. Full fine-tuning scripts use standard DDP via HuggingFace Accelerate, same as `zimage_train.py` and `qwen_image_train.py`. This is consistent with how all full fine-tuning scripts in this project work.
 
 The saved checkpoint is a full DiT safetensors file and can be loaded with `--dit` in `flux_2_generate_image.py` (no `--lora_weight` needed).
 
@@ -270,8 +277,13 @@ The saved checkpoint is a full DiT safetensors file and can be loaded with `--di
 - `flux_2_train.py`を使用します。
 - LoRA学習と同様に`--vae`、`--text_encoder`、`--model_version`の指定が必要です。
 - **学習には`klein-base-4b`または`klein-base-9b`を推奨します**。蒸留モデル（`dev`、`klein-4b`、`klein-9b`）は推論向けであり、学習結果が良くない場合があります。
+- 5つのモデルバージョンすべて（`dev`、`klein-4b`、`klein-9b`、`klein-base-4b`、`klein-base-9b`）が`--model_version`で指定可能です。
 - `--full_bf16`はDiTをbfloat16で保持・更新し、デフォルトのfloat32と比べてメモリを半減します。`--mixed_precision bf16`が必要です。
-- `--fp8_base`と`--fp8_scaled`はフルファインチューニングでは**サポートされていません**（警告と共に自動的に無効化されます）。
+- `--fp8_base`と`--fp8_scaled`はフルファインチューニングでは**サポートされていません**（警告と共に自動的に無効化されます）。FP8は量子化技術であり、勾配更新と非互換です。
+- ログ記録（`--wandb_run_name`等）、HuggingFaceアップロード（`--huggingface_repo_id`）、状態保存（`--save_state`）、チェックポイントからの再開（`--resume`）はLoRA学習と同様に動作します。
+- Ampere以降のGPUでは、`--cuda_allow_tf32`でTF32を有効化して行列演算を高速化できます。`--cuda_cudnn_benchmark`でcuDNNオートチューナーを有効化できます。
+- **マルチGPU**: DDP（DistributedDataParallel）によるマルチGPU学習がサポートされています。`accelerate launch --num_processes N`で起動してください。LoRA学習と同様にHuggingFace Accelerateが自動的に処理します。
+- **DeepSpeed**: サポートされていません。フルファインチューニングスクリプトは標準DDPを使用します。これは`zimage_train.py`や`qwen_image_train.py`と同様の設計です。
 - 保存されたチェックポイントは完全なDiT safetensorsファイルであり、`flux_2_generate_image.py`の`--dit`に直接指定できます（`--lora_weight`は不要）。
 
 </details>

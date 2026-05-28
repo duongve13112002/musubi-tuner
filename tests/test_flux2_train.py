@@ -23,9 +23,7 @@ import unittest
 from unittest import mock
 
 
-# ---------------------------------------------------------------------------
 # Lightweight sys.modules mocking for the torchvision / torch-heavy chain
-# ---------------------------------------------------------------------------
 
 def _make_mock_module(name: str, **attrs) -> types.ModuleType:
     mod = types.ModuleType(name)
@@ -86,9 +84,7 @@ from musubi_tuner.flux_2_train_network import Flux2NetworkTrainer  # noqa: E402
 from musubi_tuner.hv_train_network import setup_parser_common  # noqa: E402
 
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 def _build_parser() -> argparse.ArgumentParser:
     """Return a fully configured argument parser as main() would build it."""
@@ -100,9 +96,7 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-# ---------------------------------------------------------------------------
 # Tests
-# ---------------------------------------------------------------------------
 
 
 class TestFlux2FinetuneParsersArgs(unittest.TestCase):

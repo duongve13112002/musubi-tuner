@@ -32,9 +32,7 @@ from musubi_tuner.dataset.bucket import BucketBatchManager
 import musubi_tuner.cache_text_encoder_outputs as cache_te
 
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 
 def _make_item(key: str, captions: list[str], cache_path: str) -> ItemInfo:
@@ -60,9 +58,7 @@ def _make_dataset_mock(cache_dir: str, dropout_rate: float):
     return ds
 
 
-# ---------------------------------------------------------------------------
 # 1. get_caption_batches
-# ---------------------------------------------------------------------------
 
 
 class TestGetCaptionBatches(unittest.TestCase):
@@ -119,9 +115,7 @@ class TestGetCaptionBatches(unittest.TestCase):
         self.assertEqual(indices, [0, 1, 2, 3])
 
 
-# ---------------------------------------------------------------------------
 # 2. _select_caption_variant
-# ---------------------------------------------------------------------------
 
 
 class TestSelectCaptionVariant(unittest.TestCase):
@@ -195,9 +189,7 @@ class TestSelectCaptionVariant(unittest.TestCase):
                 self.assertFalse(float(result["embed_bfloat16"].mean()) > 90)
 
 
-# ---------------------------------------------------------------------------
 # 3. encode_empty_caption_embeddings
-# ---------------------------------------------------------------------------
 
 
 class TestEncodeEmptyCaptionEmbeddings(unittest.TestCase):
@@ -258,9 +250,7 @@ class TestEncodeEmptyCaptionEmbeddings(unittest.TestCase):
                 self.assertIn(get_empty_caption_cache_path(d2), paths)
 
 
-# ---------------------------------------------------------------------------
 # 4. End-to-end: save multiple captions → merge → select
-# ---------------------------------------------------------------------------
 
 
 ARCH_FLUX2_FULL = "flux.2-dev"  # any non-empty string works for testing
@@ -358,9 +348,7 @@ class TestMultiCaptionCacheEndToEnd(unittest.TestCase):
                 self.assertAlmostEqual(float(sd[key].mean()), float(i), places=3)
 
 
-# ---------------------------------------------------------------------------
 # 5. Datasource caption reading
-# ---------------------------------------------------------------------------
 
 
 class TestDatasourceCaptionReading(unittest.TestCase):
@@ -465,9 +453,7 @@ class TestDatasourceCaptionReading(unittest.TestCase):
             self.assertEqual(captions, [""])
 
 
-# ---------------------------------------------------------------------------
 # 6. ItemInfo caption property (backward compatibility)
-# ---------------------------------------------------------------------------
 
 
 class TestItemInfoCaptionProperty(unittest.TestCase):

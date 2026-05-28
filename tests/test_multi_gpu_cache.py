@@ -29,9 +29,7 @@ import musubi_tuner.cache_latents as cache_latents
 import musubi_tuner.cache_text_encoder_outputs as cache_te
 
 
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 
 def _make_item(idx: int, cache_dir: str, ext: str = ".safetensors") -> SimpleNamespace:
@@ -91,9 +89,7 @@ def _make_args(cache_dir: str, skip_existing: bool = False) -> argparse.Namespac
     return args
 
 
-# ---------------------------------------------------------------------------
 # Tests for cache_latents.encode_datasets
-# ---------------------------------------------------------------------------
 
 
 class TestEncodeDatasetsSingleProcess(unittest.TestCase):
@@ -246,9 +242,7 @@ class TestEncodeDatasetsMultiGPU(unittest.TestCase):
                 self.assertTrue(kwargs.get("disable"), "tqdm must be disabled for non-main process")
 
 
-# ---------------------------------------------------------------------------
 # Tests for cache_text_encoder_outputs.process_text_encoder_batches
-# ---------------------------------------------------------------------------
 
 
 class TestProcessTEBatchesSingleProcess(unittest.TestCase):
@@ -314,9 +308,7 @@ class TestProcessTEBatchesMultiGPU(unittest.TestCase):
             self.assertEqual(len(keys), len(set(keys)), f"No duplicates for N={n}")
 
 
-# ---------------------------------------------------------------------------
 # Tests for cache_text_encoder_outputs.post_process_cache_files
-# ---------------------------------------------------------------------------
 
 
 class TestPostProcessCacheFiles(unittest.TestCase):
@@ -372,9 +364,7 @@ class TestPostProcessCacheFiles(unittest.TestCase):
             self.assertFalse(os.path.exists(stale), "Stale file must be deleted in single-process mode")
 
 
-# ---------------------------------------------------------------------------
 # Tests for full path collection (cleanup correctness)
-# ---------------------------------------------------------------------------
 
 
 class TestFullPathCollection(unittest.TestCase):
