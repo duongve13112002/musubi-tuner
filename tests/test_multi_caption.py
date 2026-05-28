@@ -220,14 +220,17 @@ class TestEncodeEmptyCaptionEmbeddings(unittest.TestCase):
                 get_empty_caption_cache_path(tmpdir),
             )
 
-    def test_skips_if_file_already_exists(self):
+    def test_always_calls_encode_even_if_file_exists(self):
+        # Regression test for dual-encoder bug: HunyuanVideo calls encode_empty_caption_embeddings
+        # twice (once per TE). The old early-exit on os.path.exists caused TE2 to be skipped,
+        # leaving the empty file with only TE1 keys. merge-on-save handles idempotency correctly.
         with tempfile.TemporaryDirectory() as tmpdir:
             ds = _make_dataset_mock(tmpdir, dropout_rate=0.1)
             empty_path = get_empty_caption_cache_path(tmpdir)
             save_file({"embed_bfloat16": torch.zeros(4)}, empty_path)
             calls = []
             cache_te.encode_empty_caption_embeddings(lambda item: calls.append(item), [ds])
-            self.assertEqual(calls, [])
+            self.assertEqual(len(calls), 1)
 
     def test_non_main_process_does_nothing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
