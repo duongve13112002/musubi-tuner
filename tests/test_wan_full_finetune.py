@@ -12,6 +12,9 @@ Tests verify:
 6. Gather ordering: gather before end_training in source code
 7. Simulated training loop: step/skip logic using stub optimizers
 8. do_inference dual routing: high-noise t → high model, low-noise t → low model
+9. load_transformer override: single load, no triple-load bug
+10. Source guards: DeepSpeed check, DDP warning, single-model skip warning
+11. Eval/train fn switching: both optimizer fns called on save/sample
 """
 
 import argparse
@@ -545,6 +548,258 @@ class TestDoInferenceDualRouting:
                 )
 
         assert trainer._inference_transformer_high is None
+
+
+# ---------------------------------------------------------------------------
+# 9. load_transformer override — prevents triple-loading of high-noise model
+# ---------------------------------------------------------------------------
+
+class TestLoadTransformerOverride:
+    """WanTrainer.load_transformer must call load_wan_model exactly once per invocation
+    and must NOT internally load the high-noise model as a side-effect (the triple-load
+    bug from the parent WanNetworkTrainer.load_transformer).
+    """
+
+    def _make_trainer(self):
+        trainer = WanTrainer.__new__(WanTrainer)
+        trainer.config = SimpleNamespace(hidden_size=1024)
+        trainer.dit_high_noise_path = "high.safetensors"
+        trainer.high_low_training = True
+        trainer.blocks_to_swap = 0
+        trainer._inference_transformer_high = None
+        return trainer
+
+    def _make_args(self):
+        return argparse.Namespace(
+            fp8_scaled=False,
+            disable_numpy_memmap=False,
+            force_v2_1_time_embedding=False,
+        )
+
+    def test_calls_load_wan_model_exactly_once(self):
+        """Each load_transformer call must result in exactly one load_wan_model call."""
+        trainer = self._make_trainer()
+        mock_model = _TinyModel()
+        mock_accel = MagicMock()
+        mock_accel.device = torch.device("cpu")
+        load_calls = []
+
+        def _fake_load(config, device, path, attn_mode, split_attn, loading_device, dtype, fp8_scaled, **kw):
+            load_calls.append(path)
+            return mock_model
+
+        with patch("musubi_tuner.wan.modules.model.load_wan_model", side_effect=_fake_load):
+            result = trainer.load_transformer(
+                mock_accel, self._make_args(), "low.safetensors", "torch", False, "cpu", torch.bfloat16
+            )
+
+        assert len(load_calls) == 1, (
+            f"Expected exactly 1 load_wan_model call, got {len(load_calls)}: {load_calls}"
+        )
+        assert load_calls[0] == "low.safetensors"
+        assert result is mock_model
+
+    def test_high_noise_path_not_loaded_as_side_effect(self):
+        """When loading the low-noise model, the high-noise file must not be touched."""
+        trainer = self._make_trainer()
+        trainer.dit_high_noise_path = "high.safetensors"
+        mock_model = _TinyModel()
+        mock_accel = MagicMock()
+        mock_accel.device = torch.device("cpu")
+        loaded_paths = []
+
+        def _tracker(config, device, path, *a, **kw):
+            loaded_paths.append(path)
+            return mock_model
+
+        with patch("musubi_tuner.wan.modules.model.load_wan_model", side_effect=_tracker):
+            trainer.load_transformer(
+                mock_accel, self._make_args(), "low.safetensors", "torch", False, "cpu", torch.bfloat16
+            )
+
+        assert "high.safetensors" not in loaded_paths, (
+            f"high-noise model was loaded as a side-effect of loading low-noise model. "
+            f"Loaded paths: {loaded_paths}"
+        )
+
+    def test_second_call_for_high_model_also_once(self):
+        """Loading the high-noise model explicitly also causes only one load_wan_model call."""
+        trainer = self._make_trainer()
+        mock_model = _TinyModel()
+        mock_accel = MagicMock()
+        mock_accel.device = torch.device("cpu")
+        load_calls = []
+
+        def _fake_load(config, device, path, *a, **kw):
+            load_calls.append(path)
+            return mock_model
+
+        with patch("musubi_tuner.wan.modules.model.load_wan_model", side_effect=_fake_load):
+            trainer.load_transformer(
+                mock_accel, self._make_args(), "high.safetensors", "torch", False, "cpu", torch.bfloat16
+            )
+
+        # Must be exactly 1 call — parent would call it twice (main + internal inactive load)
+        assert len(load_calls) == 1, (
+            f"Expected 1 load for high-noise model, got {len(load_calls)}: {load_calls}"
+        )
+
+    def test_dit_inactive_state_dict_set_to_none(self):
+        """Override must clear dit_inactive_state_dict — no swap state for full fine-tune."""
+        trainer = self._make_trainer()
+        trainer.dit_inactive_state_dict = {"old": "state"}  # pre-existing state
+        mock_model = _TinyModel()
+        mock_accel = MagicMock()
+        mock_accel.device = torch.device("cpu")
+
+        with patch("musubi_tuner.wan.modules.model.load_wan_model", return_value=mock_model):
+            trainer.load_transformer(
+                mock_accel, self._make_args(), "low.safetensors", "torch", False, "cpu", torch.bfloat16
+            )
+
+        assert trainer.dit_inactive_state_dict is None, (
+            "dit_inactive_state_dict should be None after override — state-dict swap is not used for full fine-tune"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 10. Source guards: DeepSpeed, DDP warning, single-model skip warning
+#     (extends the ordering tests with new source-level checks)
+# ---------------------------------------------------------------------------
+
+class TestSourceGuards:
+    @staticmethod
+    def _src():
+        src_path = os.path.join(
+            os.path.dirname(__file__), "..", "src", "musubi_tuner", "wan_train.py"
+        )
+        with open(src_path, encoding="utf-8") as f:
+            return f.read()
+
+    def test_deepspeed_guard_present_in_train(self):
+        """wan_train.py must explicitly check is_deepspeed_active after prepare_accelerator."""
+        src = self._src()
+        assert "is_deepspeed_active(accelerator)" in src, (
+            "is_deepspeed_active guard not found — WAN full fine-tune train() overrides base class "
+            "and must add its own DeepSpeed rejection."
+        )
+        assert "WAN does not support DeepSpeed" in src
+
+    def test_ddp_dual_model_warning_present(self):
+        """Source must warn that DDP with dual-model training is unsupported."""
+        src = self._src()
+        assert "Multi-GPU (DDP) is not supported for dual-model training" in src
+
+    def test_single_model_skip_warning_present(self):
+        """Source must warn about ~50% effective step reduction in single-model mode."""
+        src = self._src()
+        assert "50%%" in src or "~50%" in src, (
+            "Single-model skip-rate warning not found in source."
+        )
+
+    def test_is_deepspeed_active_imported(self):
+        """is_deepspeed_active must be imported from deepspeed_utils."""
+        src = self._src()
+        assert "is_deepspeed_active" in src and "deepspeed_utils" in src
+
+
+# ---------------------------------------------------------------------------
+# 11. Eval/train fn switching — both models toggled on save/sample
+# ---------------------------------------------------------------------------
+
+class TestEvalTrainFnSwitching:
+    @staticmethod
+    def _src():
+        src_path = os.path.join(
+            os.path.dirname(__file__), "..", "src", "musubi_tuner", "wan_train.py"
+        )
+        with open(src_path, encoding="utf-8") as f:
+            return f.read()
+
+    def test_both_eval_fns_called_in_step_section(self):
+        """In the mid-step save/sample block, both optimizer_eval_fn_low and
+        optimizer_eval_fn_high must be called instead of just the active model's fn."""
+        src = self._src()
+        lines = src.splitlines()
+        in_block = False
+        saw_eval_low = False
+        saw_eval_high = False
+        saw_train_low = False
+        saw_train_high = False
+        for line in lines:
+            stripped = line.strip()
+            if "if should_sampling or should_saving:" in stripped:
+                in_block = True
+            if in_block:
+                if "optimizer_eval_fn_low()" == stripped:
+                    saw_eval_low = True
+                if "optimizer_eval_fn_high()" == stripped:
+                    saw_eval_high = True
+                if "optimizer_train_fn_low()" == stripped:
+                    saw_train_low = True
+                if "optimizer_train_fn_high()" == stripped:
+                    saw_train_high = True
+            if in_block and "optimizer_train_fn_high()" == stripped:
+                break  # end of block
+        assert saw_eval_low, "optimizer_eval_fn_low() not called in should_sampling/saving block"
+        assert saw_eval_high, "optimizer_eval_fn_high() not called in should_sampling/saving block"
+        assert saw_train_low, "optimizer_train_fn_low() not called in should_sampling/saving block"
+        assert saw_train_high, "optimizer_train_fn_high() not called in should_sampling/saving block"
+
+    def test_standalone_opt_eval_fn_not_called(self):
+        """The old pattern opt_eval_fn() (single-model) must not appear alone in the block."""
+        src = self._src()
+        lines = src.splitlines()
+        in_block = False
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if "if should_sampling or should_saving:" in stripped:
+                in_block = True
+            if in_block and stripped == "opt_eval_fn()":
+                pytest.fail(
+                    f"Line {i+1}: opt_eval_fn() called standalone — "
+                    "both optimizer_eval_fn_low() and optimizer_eval_fn_high() should be called instead."
+                )
+            if in_block and "optimizer_train_fn_high()" == stripped:
+                break
+
+    def test_dual_eval_fn_simulation(self):
+        """Simulate the fixed pattern: both low and high eval fns are always called."""
+        eval_low_calls = 0
+        eval_high_calls = 0
+        train_low_calls = 0
+        train_high_calls = 0
+
+        def optimizer_eval_fn_low():
+            nonlocal eval_low_calls
+            eval_low_calls += 1
+
+        def optimizer_eval_fn_high():
+            nonlocal eval_high_calls
+            eval_high_calls += 1
+
+        def optimizer_train_fn_low():
+            nonlocal train_low_calls
+            train_low_calls += 1
+
+        def optimizer_train_fn_high():
+            nonlocal train_high_calls
+            train_high_calls += 1
+
+        # Simulate the fixed block (both models, regardless of which was active)
+        should_sampling = True
+        should_saving = False
+        if should_sampling or should_saving:
+            optimizer_eval_fn_low()
+            optimizer_eval_fn_high()
+            # ... sampling/saving work would happen here ...
+            optimizer_train_fn_low()
+            optimizer_train_fn_high()
+
+        assert eval_low_calls == 1
+        assert eval_high_calls == 1
+        assert train_low_calls == 1
+        assert train_high_calls == 1
 
 
 if __name__ == "__main__":

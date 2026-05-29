@@ -70,7 +70,7 @@ from musubi_tuner.hv_train_network import (
 from musubi_tuner.training.timesteps import compute_loss_weighting_for_sd3
 from musubi_tuner.utils import huggingface_utils, model_utils, sai_model_spec, train_utils
 from musubi_tuner.utils.safetensors_utils import mem_eff_save_file
-from musubi_tuner.training.deepspeed_utils import gather_state_dict_for_save
+from musubi_tuner.training.deepspeed_utils import is_deepspeed_active, gather_state_dict_for_save
 
 import logging
 
@@ -137,6 +137,47 @@ class WanTrainer(WanNetworkTrainer):
         super().__init__()
         # used to pass the high-noise model reference into do_inference during sampling
         self._inference_transformer_high: Optional[torch.nn.Module] = None
+
+    def load_transformer(
+        self,
+        accelerator,
+        args: argparse.Namespace,
+        dit_path: str,
+        attn_mode: str,
+        split_attn: bool,
+        loading_device,
+        dit_weight_dtype: Optional[torch.dtype],
+    ) -> torch.nn.Module:
+        """Override to load exactly one model without the LoRA dual-model internal load.
+
+        WanNetworkTrainer.load_transformer embeds the LoRA state-dict swap mechanism:
+        when high_low_training is True it always loads *both* models internally and
+        stores the second as self.dit_inactive_state_dict.  For full fine-tuning we
+        manage two separate model objects explicitly in wan_train.py, so that internal
+        second load causes the high-noise model file to be read three times total on a
+        dual-model launch (once wasted in the first call, twice in the second call).
+        This override loads only the requested dit_path and skips the swap setup.
+        """
+        from musubi_tuner.wan.modules.model import load_wan_model
+
+        model = load_wan_model(
+            self.config,
+            accelerator.device,
+            dit_path,
+            attn_mode,
+            split_attn,
+            loading_device,
+            dit_weight_dtype,
+            args.fp8_scaled,
+            disable_numpy_memmap=args.disable_numpy_memmap,
+        )
+        if args.force_v2_1_time_embedding:
+            model.set_time_embedding_v2_1(True)
+        # Full fine-tune owns two model objects; no state-dict swap needed.
+        self.dit_inactive_state_dict = None
+        self.current_model_is_high_noise = False
+        self.next_model_is_high_noise = False
+        return model
 
     def do_inference(
         self,
@@ -412,6 +453,38 @@ class WanTrainer(WanNetworkTrainer):
             args.mixed_precision = accelerator.mixed_precision
             logger.info(f"mixed precision set to {args.mixed_precision}")
         is_main_process = accelerator.is_main_process
+
+        # DeepSpeed is fundamentally incompatible with WAN (dual-model architecture).
+        # This check is required here because WanTrainer.train() overrides the base
+        # class train() entirely, so the deepspeed_supported guard in trainer_base.py
+        # never runs.
+        if is_deepspeed_active(accelerator):
+            raise ValueError(
+                "WAN does not support DeepSpeed. The dual-model architecture (low-noise + high-noise DiT) "
+                "is fundamentally incompatible with DeepSpeed via Accelerate. "
+                "Use standard DDP (no ACCELERATE_USE_DEEPSPEED) for multi-GPU training. "
+                "/ WANはDeepSpeedをサポートしていません。デュアルモデルアーキテクチャはDeepSpeedと非互換です。"
+                "マルチGPU学習には通常のDDP（デフォルト）を使用してください。"
+            )
+
+        if train_low and train_high and accelerator.num_processes > 1:
+            logger.warning(
+                "Multi-GPU (DDP) is not supported for dual-model training (--train_models both). "
+                "Each GPU process samples timesteps independently, so different processes may route to "
+                "different models per gradient-sync step, causing DDP all-reduce to hang. "
+                "Use single-GPU training for --train_models both. "
+                "/ デュアルモデル学習（--train_models both）ではマルチGPU（DDP）はサポートされていません。"
+                "--train_models bothにはシングルGPUで実行してください。"
+            )
+
+        if train_low != train_high:
+            logger.warning(
+                "Single-model training mode: ~50%% of batches are skipped (timestep outside training range). "
+                "Effective gradient updates ≈ max_train_steps / 2. "
+                "To get N effective training epochs set --max_train_epochs = 2*N. "
+                "/ シングルモデル学習モード: 約50%%のバッチがスキップされます。"
+                "実効エポック数は指定値の約半分になります。--max_train_epochs = 2*N で N エポック相当になります。"
+            )
 
         dit_dtype = model_utils.str_to_dtype(args.dit_dtype)
         vae_dtype = model_utils.str_to_dtype(args.vae_dtype)
@@ -691,18 +764,9 @@ class WanTrainer(WanNetworkTrainer):
                 if any("_orig_mod." in k for k in state_dict.keys()):
                     state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
             else:
-                has_self_ref = (
-                    hasattr(unwrapped_model, "_modules")
-                    and "_orig_mod" in unwrapped_model._modules
-                    and unwrapped_model._modules["_orig_mod"] is unwrapped_model
-                )
-                if has_self_ref:
-                    del unwrapped_model._modules["_orig_mod"]
-                try:
-                    state_dict = unwrapped_model.state_dict()
-                finally:
-                    if has_self_ref:
-                        unwrapped_model._modules["_orig_mod"] = unwrapped_model
+                # torch.compile stores compiled state under _orig_mod. keys; strip the prefix
+                # so the saved checkpoint is compatible with non-compiled loading.
+                state_dict = unwrapped_model.state_dict()
                 if any("_orig_mod." in k for k in state_dict.keys()):
                     state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
 
@@ -851,7 +915,10 @@ class WanTrainer(WanNetworkTrainer):
                     should_saving = args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0
 
                     if should_sampling or should_saving:
-                        opt_eval_fn()
+                        # Always switch BOTH optimizers to eval — sampling and saving use both
+                        # models regardless of which model was active for this step.
+                        optimizer_eval_fn_low()
+                        optimizer_eval_fn_high()
                         if should_sampling:
                             self._sample_images_dual(accelerator, args, None, global_step, vae,
                                                      transformer_low, transformer_high, sample_parameters, dit_dtype)
@@ -866,7 +933,8 @@ class WanTrainer(WanNetworkTrainer):
                                         remove_model_ckpt(_make_ckpt_name(args.output_name, suffix_low, "low", remove_no, True, False))
                                     if train_high:
                                         remove_model_ckpt(_make_ckpt_name(args.output_name, suffix_high, "high", remove_no, True, False))
-                        opt_train_fn()
+                        optimizer_train_fn_low()
+                        optimizer_train_fn_high()
 
                 current_loss = loss.detach().item()
                 loss_recorder.add(epoch=epoch, step=step, loss=current_loss)
