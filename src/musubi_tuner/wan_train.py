@@ -540,13 +540,9 @@ class WanTrainer(WanNetworkTrainer):
         if args.dit_high_noise:
             loading_device_high = "cpu" if blocks_to_swap > 0 else accelerator.device
             logger.info(f"Loading high-noise DiT from {args.dit_high_noise}")
-            # reuse load_transformer: temporarily swap dit path arg
-            original_dit = args.dit
-            args.dit = args.dit_high_noise
             transformer_high = self.load_transformer(
                 accelerator, args, args.dit_high_noise, attn_mode, args.split_attn, loading_device_high, dit_dtype
             )
-            args.dit = original_dit
             if blocks_to_swap > 0:
                 logger.info(f"Enabling block swap ({blocks_to_swap} blocks) for high-noise model")
                 transformer_high.enable_block_swap(
