@@ -35,6 +35,12 @@ import logging
 from musubi_tuner.zimage_train_network import ZImageNetworkTrainer
 from musubi_tuner.utils import huggingface_utils, model_utils, sai_model_spec, train_utils
 from musubi_tuner.utils.safetensors_utils import mem_eff_save_file
+from musubi_tuner.training.deepspeed_utils import (
+    is_deepspeed_active,
+    patch_model_for_deepspeed,
+    check_block_swap_deepspeed_zero3,
+    gather_state_dict_for_save,
+)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -257,6 +263,11 @@ class ZImageTrainer(ZImageNetworkTrainer):
             )
             accelerator.print("enable full bf16 training.")
 
+        check_block_swap_deepspeed_zero3(blocks_to_swap, accelerator)
+
+        if is_deepspeed_active(accelerator):
+            patch_model_for_deepspeed(transformer)
+
         if blocks_to_swap > 0:
             transformer = accelerator.prepare(transformer, device_placement=[not blocks_to_swap > 0])
             accelerator.unwrap_model(transformer).move_to_device_except_swap_blocks(accelerator.device)  # reduce peak memory usage
@@ -409,7 +420,8 @@ class ZImageTrainer(ZImageNetworkTrainer):
         save_dtype = dit_dtype
 
         def save_model(
-            ckpt_name: str, unwrapped_model, steps, epoch_no, force_sync_upload=False, use_memory_efficient_saving=False
+            ckpt_name: str, unwrapped_model, steps, epoch_no, force_sync_upload=False,
+            use_memory_efficient_saving=False, precomputed_state=None
         ):
             os.makedirs(args.output_dir, exist_ok=True)
             ckpt_file = os.path.join(args.output_dir, ckpt_name)
@@ -446,26 +458,33 @@ class ZImageTrainer(ZImageNetworkTrainer):
 
             metadata_to_save.update(sai_metadata)
 
-            # temporarily remove self-referencing _orig_mod to avoid infinite recursion in state_dict()
-            has_self_ref_orig_mod_module = (
-                hasattr(unwrapped_model, "_modules")
-                and "_orig_mod" in unwrapped_model._modules
-                and unwrapped_model._modules["_orig_mod"] is unwrapped_model
-            )
-            if has_self_ref_orig_mod_module:
-                del unwrapped_model._modules["_orig_mod"]
-
-            try:
-                state_dict = unwrapped_model.state_dict()
-            finally:
-                # restore _orig_mod after state_dict() if it was removed
+            if precomputed_state is not None:
+                # ZeRO Stage 3: state dict was gathered from all processes before this call
+                state_dict = precomputed_state
+                if any("_orig_mod." in k for k in state_dict.keys()):
+                    logger.info("detected compiled model, stripping _orig_mod. prefix from state dict")
+                    state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+            else:
+                # temporarily remove self-referencing _orig_mod to avoid infinite recursion in state_dict()
+                has_self_ref_orig_mod_module = (
+                    hasattr(unwrapped_model, "_modules")
+                    and "_orig_mod" in unwrapped_model._modules
+                    and unwrapped_model._modules["_orig_mod"] is unwrapped_model
+                )
                 if has_self_ref_orig_mod_module:
-                    unwrapped_model._modules["_orig_mod"] = unwrapped_model
+                    del unwrapped_model._modules["_orig_mod"]
 
-            # if model is compiled, get original model state dict
-            if any("_orig_mod." in k for k in state_dict.keys()):
-                logger.info("detected compiled model, getting original model state dict for saving")
-                state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+                try:
+                    state_dict = unwrapped_model.state_dict()
+                finally:
+                    # restore _orig_mod after state_dict() if it was removed
+                    if has_self_ref_orig_mod_module:
+                        unwrapped_model._modules["_orig_mod"] = unwrapped_model
+
+                # if model is compiled, get original model state dict
+                if any("_orig_mod." in k for k in state_dict.keys()):
+                    logger.info("detected compiled model, getting original model state dict for saving")
+                    state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
 
             if use_memory_efficient_saving:
                 mem_eff_save_file(state_dict, ckpt_file, metadata_to_save)
@@ -579,6 +598,7 @@ class ZImageTrainer(ZImageNetworkTrainer):
                             self.sample_images(accelerator, args, None, global_step, vae, transformer, sample_parameters, dit_dtype)
 
                         if should_saving:
+                            precomputed_state = gather_state_dict_for_save(accelerator, transformer)
                             accelerator.wait_for_everyone()
                             if accelerator.is_main_process:
                                 ckpt_name = train_utils.get_step_ckpt_name(args.output_name, global_step)
@@ -588,6 +608,7 @@ class ZImageTrainer(ZImageNetworkTrainer):
                                     global_step,
                                     epoch,
                                     use_memory_efficient_saving=args.mem_eff_save,
+                                    precomputed_state=precomputed_state,
                                 )
 
                                 if args.save_state:
@@ -624,6 +645,7 @@ class ZImageTrainer(ZImageNetworkTrainer):
             optimizer_eval_fn()
             if args.save_every_n_epochs is not None:
                 saving = (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
+                precomputed_state = gather_state_dict_for_save(accelerator, transformer, should_save=saving)
                 if is_main_process and saving:
                     ckpt_name = train_utils.get_epoch_ckpt_name(args.output_name, epoch + 1)
                     save_model(
@@ -632,6 +654,7 @@ class ZImageTrainer(ZImageNetworkTrainer):
                         global_step,
                         epoch + 1,
                         use_memory_efficient_saving=args.mem_eff_save,
+                        precomputed_state=precomputed_state,
                     )
 
                     remove_epoch_no = train_utils.get_remove_epoch_no(args, epoch + 1)
@@ -648,6 +671,9 @@ class ZImageTrainer(ZImageNetworkTrainer):
             # end of epoch
 
         metadata["ss_training_finished_at"] = str(time.time())
+
+        # ZeRO3: gather BEFORE unwrapping — all processes participate
+        precomputed_state = gather_state_dict_for_save(accelerator, transformer)
 
         if is_main_process:
             transformer = accelerator.unwrap_model(transformer)
@@ -667,6 +693,7 @@ class ZImageTrainer(ZImageNetworkTrainer):
                 num_train_epochs,
                 force_sync_upload=True,
                 use_memory_efficient_saving=args.mem_eff_save,
+                precomputed_state=precomputed_state,
             )
 
             logger.info("model saved.")

@@ -758,11 +758,12 @@ class LoRANetwork(torch.nn.Module):
     def get_trainable_params(self):
         return self.parameters()
 
-    def save_weights(self, file, dtype, metadata):
+    def save_weights(self, file, dtype, metadata, state_dict=None):
         if metadata is not None and len(metadata) == 0:
             metadata = None
 
-        state_dict = self.state_dict()
+        if state_dict is None:
+            state_dict = self.state_dict()
 
         if dtype is not None:
             for key in list(state_dict.keys()):

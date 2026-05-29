@@ -40,6 +40,12 @@ class WanNetworkTrainer(NetworkTrainer):
     def __init__(self):
         super().__init__()
 
+    @property
+    def deepspeed_supported(self) -> bool:
+        """WAN uses two transformer models simultaneously; DeepSpeed via Accelerate
+        only supports wrapping a single model, so it is fundamentally incompatible."""
+        return False
+
     # region model specific
 
     @property

@@ -43,6 +43,12 @@ from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_HUNYUAN_VIDEO
 import logging
 
 from musubi_tuner.utils import huggingface_utils, model_utils, train_utils, sai_model_spec
+from musubi_tuner.training.deepspeed_utils import (
+    is_deepspeed_active,
+    patch_model_for_deepspeed,
+    check_block_swap_deepspeed_zero3,
+    gather_state_dict_for_save,
+)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -88,8 +94,11 @@ class collator_class:
 
 
 def prepare_accelerator(args: argparse.Namespace) -> Accelerator:
-    """
-    DeepSpeed is not supported in this script currently.
+    """Create and return an Accelerator configured from the given args.
+
+    DeepSpeed is supported via `accelerate config`. Run `accelerate config`
+    and select DeepSpeed with a JSON config file before launching with
+    `accelerate launch`. No extra CLI flags are required in the training script.
     """
     if args.logging_dir is None:
         logging_dir = None
@@ -120,6 +129,9 @@ def prepare_accelerator(args: argparse.Namespace) -> Accelerator:
             if args.wandb_api_key is not None:
                 wandb.login(key=args.wandb_api_key)
 
+    # DeepSpeed manages its own process groups; DDP kwargs are only meaningful for DDP.
+    using_deepspeed = os.environ.get("ACCELERATE_USE_DEEPSPEED", "false").lower() == "true"
+
     kwargs_handlers = [
         (
             InitProcessGroupKwargs(
@@ -136,7 +148,7 @@ def prepare_accelerator(args: argparse.Namespace) -> Accelerator:
             DistributedDataParallelKwargs(
                 gradient_as_bucket_view=args.ddp_gradient_as_bucket_view, static_graph=args.ddp_static_graph
             )
-            if args.ddp_gradient_as_bucket_view or args.ddp_static_graph
+            if not using_deepspeed and (args.ddp_gradient_as_bucket_view or args.ddp_static_graph)
             else None
         ),
     ]
@@ -890,6 +902,13 @@ class FineTuningTrainer:
         logger.info(f"casting model to {dit_weight_dtype}")
         transformer.to(dit_weight_dtype)
 
+        # Fail fast before the DeepSpeed engine is initialised if both block swap
+        # and ZeRO Stage 3 are configured — they are mutually exclusive.
+        check_block_swap_deepspeed_zero3(blocks_to_swap, accelerator)
+
+        if is_deepspeed_active(accelerator):
+            patch_model_for_deepspeed(transformer)
+
         if blocks_to_swap > 0:
             transformer = accelerator.prepare(transformer, device_placement=[not blocks_to_swap > 0])
             accelerator.unwrap_model(transformer).move_to_device_except_swap_blocks(accelerator.device)  # reduce peak memory usage
@@ -955,7 +974,7 @@ class FineTuningTrainer:
         del train_dataset_group
 
         # function for saving/removing
-        def save_model(ckpt_name: str, unwrapped_nw, steps, epoch_no, force_sync_upload=False):
+        def save_model(ckpt_name: str, unwrapped_nw, steps, epoch_no, force_sync_upload=False, precomputed_state=None):
             os.makedirs(args.output_dir, exist_ok=True)
             ckpt_file = os.path.join(args.output_dir, ckpt_name)
 
@@ -984,7 +1003,8 @@ class FineTuningTrainer:
                 custom_arch=args.metadata_arch,
             )
 
-            save_file(unwrapped_nw.state_dict(), ckpt_file, sai_metadata)
+            state_dict = precomputed_state if precomputed_state is not None else unwrapped_nw.state_dict()
+            save_file(state_dict, ckpt_file, sai_metadata)
             if args.huggingface_repo_id is not None:
                 huggingface_utils.upload(args, ckpt_file, "/" + ckpt_name, force_sync_upload=force_sync_upload)
 
@@ -1120,10 +1140,12 @@ class FineTuningTrainer:
 
                     # 指定ステップごとにモデルを保存
                     if args.save_every_n_steps is not None and global_step % args.save_every_n_steps == 0:
+                        precomputed_state = gather_state_dict_for_save(accelerator, transformer)
                         accelerator.wait_for_everyone()
                         if accelerator.is_main_process:
                             ckpt_name = train_utils.get_step_ckpt_name(args.output_name, global_step)
-                            save_model(ckpt_name, accelerator.unwrap_model(transformer), global_step, epoch)
+                            save_model(ckpt_name, accelerator.unwrap_model(transformer), global_step, epoch,
+                                       precomputed_state=precomputed_state)
 
                             if args.save_state:
                                 train_utils.save_and_remove_state_stepwise(args, accelerator, global_step)
@@ -1157,9 +1179,11 @@ class FineTuningTrainer:
             optimizer_eval_fn()
             if args.save_every_n_epochs is not None:
                 saving = (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
+                precomputed_state = gather_state_dict_for_save(accelerator, transformer, should_save=saving)
                 if is_main_process and saving:
                     ckpt_name = train_utils.get_epoch_ckpt_name(args.output_name, epoch + 1)
-                    save_model(ckpt_name, accelerator.unwrap_model(transformer), global_step, epoch + 1)
+                    save_model(ckpt_name, accelerator.unwrap_model(transformer), global_step, epoch + 1,
+                               precomputed_state=precomputed_state)
 
                     remove_epoch_no = train_utils.get_remove_epoch_no(args, epoch + 1)
                     if remove_epoch_no is not None:
@@ -1174,6 +1198,11 @@ class FineTuningTrainer:
 
             # end of epoch
 
+        # ZeRO3: gather BEFORE unwrapping the model and BEFORE end_training() closes the
+        # DeepSpeed engine. accelerator.get_state_dict() is a collective — all processes
+        # must call it simultaneously while the engine is still alive.
+        precomputed_state = gather_state_dict_for_save(accelerator, transformer)
+
         if is_main_process:
             transformer = accelerator.unwrap_model(transformer)
 
@@ -1185,7 +1214,8 @@ class FineTuningTrainer:
 
         if is_main_process:
             ckpt_name = train_utils.get_last_ckpt_name(args.output_name)
-            save_model(ckpt_name, transformer, global_step, num_train_epochs, force_sync_upload=True)
+            save_model(ckpt_name, transformer, global_step, num_train_epochs, force_sync_upload=True,
+                       precomputed_state=precomputed_state)
 
             logger.info("model saved.")
 

@@ -10,6 +10,7 @@ wan_train_network.py, ...).
 import ast
 import asyncio
 import importlib
+import inspect
 import argparse
 import math
 import os
@@ -55,6 +56,13 @@ from musubi_tuner.training.accelerator_setup import (
     clean_memory_on_device,
     collator_class,
     prepare_accelerator,
+)
+from musubi_tuner.training.deepspeed_utils import (
+    is_deepspeed_active,
+    is_deepspeed_zero3,
+    patch_model_for_deepspeed,
+    check_block_swap_deepspeed_zero3,
+    gather_state_dict_for_save,
 )
 from musubi_tuner.training.sampling_prompts import should_sample_images
 from musubi_tuner.training.timesteps import (
@@ -104,6 +112,15 @@ class NetworkTrainer:
         self.num_timestep_buckets: Optional[int] = None  # for get_bucketed_timestep()
         self.vae_frame_stride = 4  # all architectures require frames to be divisible by 4, except Qwen-Image-Layered
         self.default_discrete_flow_shift = 14.5  # default value for discrete flow shift for all models TODO may be None is better
+
+    @property
+    def deepspeed_supported(self) -> bool:
+        """Return False to block DeepSpeed for this trainer architecture.
+
+        Subclasses that are fundamentally incompatible with DeepSpeed (e.g. WAN,
+        which uses two transformers simultaneously) should override this to False.
+        """
+        return True
 
     # TODO 他のスクリプトと共通化する
     def generate_step_logs(
@@ -1299,6 +1316,15 @@ class NetworkTrainer:
         session_id, training_started_at = self._init_session(args)
         train_dataset_group, collator, current_epoch = self._build_dataset(args)
         accelerator, weight_dtype, dit_dtype, dit_weight_dtype, vae_dtype = self._prepare_accelerator_and_dtypes(args)
+
+        if is_deepspeed_active(accelerator) and not self.deepspeed_supported:
+            raise ValueError(
+                f"{type(self).__name__} does not support DeepSpeed. "
+                "This trainer uses multiple transformer models simultaneously, "
+                "which is incompatible with DeepSpeed via Accelerate. "
+                "Use standard DDP training instead."
+            )
+
         sample_parameters, vae = self._prepare_sampling(args, accelerator, vae_dtype)
         transformer = self._load_dit_and_swap(args, accelerator, dit_weight_dtype)
         network = self._build_network(args, accelerator, transformer, vae, weight_dtype)
@@ -1683,6 +1709,11 @@ class NetworkTrainer:
             transformer.to(dit_weight_dtype)
 
         blocks_to_swap = self.blocks_to_swap or 0
+        # Fail fast before initialising the DeepSpeed engine if both block swap and
+        # ZeRO Stage 3 are active — they are mutually exclusive.
+        check_block_swap_deepspeed_zero3(blocks_to_swap, accelerator)
+        if is_deepspeed_active(accelerator):
+            patch_model_for_deepspeed(transformer)
         if blocks_to_swap > 0:
             transformer = accelerator.prepare(transformer, device_placement=[not blocks_to_swap > 0])
             accelerator.unwrap_model(transformer).move_to_device_except_swap_blocks(accelerator.device)  # reduce peak memory usage
@@ -1912,7 +1943,7 @@ class NetworkTrainer:
         # function for saving/removing
         save_dtype = dit_dtype
 
-        def save_model(ckpt_name: str, unwrapped_nw, steps, epoch_no, force_sync_upload=False):
+        def save_model(ckpt_name: str, unwrapped_nw, steps, epoch_no, force_sync_upload=False, precomputed_state=None):
             os.makedirs(args.output_dir, exist_ok=True)
             ckpt_file = os.path.join(args.output_dir, ckpt_name)
 
@@ -1947,7 +1978,20 @@ class NetworkTrainer:
 
             metadata_to_save.update(sai_metadata)
 
-            unwrapped_nw.save_weights(ckpt_file, save_dtype, metadata_to_save)
+            # LyCORIS and custom network modules may not have the state_dict parameter.
+            # Check at runtime so ZeRO3 support is opt-in rather than breaking old networks.
+            _sw_params = inspect.signature(unwrapped_nw.save_weights).parameters
+            if "state_dict" in _sw_params:
+                unwrapped_nw.save_weights(ckpt_file, save_dtype, metadata_to_save, state_dict=precomputed_state)
+            else:
+                if precomputed_state is not None:
+                    logger.warning(
+                        f"{type(unwrapped_nw).__name__}.save_weights() does not accept a state_dict "
+                        "argument. Falling back to self.state_dict() which may produce an incomplete "
+                        "checkpoint under DeepSpeed ZeRO Stage 3. Upgrade the network module to accept "
+                        "state_dict=None for full ZeRO3 support."
+                    )
+                unwrapped_nw.save_weights(ckpt_file, save_dtype, metadata_to_save)
             if args.huggingface_repo_id is not None:
                 huggingface_utils.upload(args, ckpt_file, "/" + ckpt_name, force_sync_upload=force_sync_upload)
 
@@ -2074,10 +2118,14 @@ class NetworkTrainer:
                             _do_sample(None, global_step)
 
                         if should_saving:
+                            precomputed_state = gather_state_dict_for_save(accelerator, network)
                             accelerator.wait_for_everyone()
                             if accelerator.is_main_process:
                                 ckpt_name = train_utils.get_step_ckpt_name(args.output_name, global_step)
-                                save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch)
+                                save_model(
+                                    ckpt_name, accelerator.unwrap_model(network), global_step, epoch,
+                                    precomputed_state=precomputed_state,
+                                )
 
                                 if args.save_state:
                                     train_utils.save_and_remove_state_stepwise(args, accelerator, global_step)
@@ -2118,9 +2166,13 @@ class NetworkTrainer:
             optimizer_eval_fn()
             if args.save_every_n_epochs is not None:
                 saving = (epoch + 1) % args.save_every_n_epochs == 0 and (epoch + 1) < num_train_epochs
+                precomputed_state = gather_state_dict_for_save(accelerator, network, should_save=saving)
                 if is_main_process and saving:
                     ckpt_name = train_utils.get_epoch_ckpt_name(args.output_name, epoch + 1)
-                    save_model(ckpt_name, accelerator.unwrap_model(network), global_step, epoch + 1)
+                    save_model(
+                        ckpt_name, accelerator.unwrap_model(network), global_step, epoch + 1,
+                        precomputed_state=precomputed_state,
+                    )
 
                     remove_epoch_no = train_utils.get_remove_epoch_no(args, epoch + 1)
                     if remove_epoch_no is not None:
@@ -2138,6 +2190,10 @@ class NetworkTrainer:
         # metadata["ss_epoch"] = str(num_train_epochs)
         metadata["ss_training_finished_at"] = str(time.time())
 
+        # Collective gather must happen before end_training() closes the DeepSpeed engine
+        # and before network is unwrapped (unwrap only runs on main process)
+        precomputed_state = gather_state_dict_for_save(accelerator, network)
+
         if is_main_process:
             network = accelerator.unwrap_model(network)
 
@@ -2149,6 +2205,9 @@ class NetworkTrainer:
 
         if is_main_process:
             ckpt_name = train_utils.get_last_ckpt_name(args.output_name)
-            save_model(ckpt_name, network, global_step, num_train_epochs, force_sync_upload=True)
+            save_model(
+                ckpt_name, network, global_step, num_train_epochs,
+                force_sync_upload=True, precomputed_state=precomputed_state,
+            )
 
             logger.info("model saved.")

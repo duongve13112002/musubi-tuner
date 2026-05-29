@@ -47,8 +47,11 @@ class collator_class:
 
 
 def prepare_accelerator(args: argparse.Namespace) -> Accelerator:
-    """
-    DeepSpeed is not supported in this script currently.
+    """Create and return an Accelerator configured from the given args.
+
+    DeepSpeed is supported via `accelerate config`. Run `accelerate config`
+    and select DeepSpeed with a JSON config file before launching with
+    `accelerate launch`. No extra CLI flags are required in the training script.
     """
     if args.logging_dir is None:
         logging_dir = None
@@ -79,6 +82,9 @@ def prepare_accelerator(args: argparse.Namespace) -> Accelerator:
             if args.wandb_api_key is not None:
                 wandb.login(key=args.wandb_api_key)
 
+    # DeepSpeed manages its own process groups; DDP kwargs are only meaningful for DDP.
+    using_deepspeed = os.environ.get("ACCELERATE_USE_DEEPSPEED", "false").lower() == "true"
+
     kwargs_handlers = [
         (
             InitProcessGroupKwargs(
@@ -95,7 +101,7 @@ def prepare_accelerator(args: argparse.Namespace) -> Accelerator:
             DistributedDataParallelKwargs(
                 gradient_as_bucket_view=args.ddp_gradient_as_bucket_view, static_graph=args.ddp_static_graph
             )
-            if args.ddp_gradient_as_bucket_view or args.ddp_static_graph
+            if not using_deepspeed and (args.ddp_gradient_as_bucket_view or args.ddp_static_graph)
             else None
         ),
     ]
