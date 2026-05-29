@@ -41,6 +41,7 @@ class BaseDatasetParams:
     debug_dataset: bool = False
     architecture: str = "no_default"  # short style like "hv" or "wan"
     caption_dropout_rate: float = 0.0
+    enable_multi_caption: bool = False
 
 
 @dataclass
@@ -118,6 +119,7 @@ class ConfigSanitizer:
         "enable_bucket": bool,
         "bucket_no_upscale": bool,
         "caption_dropout_rate": float,
+        "enable_multi_caption": bool,
     }
     IMAGE_DATASET_DISTINCT_SCHEMA = {
         "image_directory": str,
@@ -309,6 +311,7 @@ def generate_dataset_group_by_blueprint(
         bucket_no_upscale: {dataset.bucket_no_upscale}
         cache_directory: "{dataset.cache_directory}"
         debug_dataset: {dataset.debug_dataset}
+        enable_multi_caption: {dataset.enable_multi_caption}
     """
         )
 

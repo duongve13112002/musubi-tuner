@@ -164,6 +164,7 @@ class BucketBatchManager:
         num_timestep_buckets: Optional[int] = None,
         caption_dropout_rate: float = 0.0,
         empty_caption_cache_path: Optional[str] = None,
+        enable_multi_caption: bool = False,
     ):
         self.batch_size = batch_size
         self.buckets = bucketed_item_info
@@ -172,6 +173,7 @@ class BucketBatchManager:
         self.num_timestep_buckets = num_timestep_buckets
         self.caption_dropout_rate = caption_dropout_rate
         self.empty_caption_cache_path = empty_caption_cache_path
+        self.enable_multi_caption = enable_multi_caption
         self.timestep_pool = None
 
         # indices for enumerating batches. each batch is reso + batch_idx. reso is (width, height) or (width, height, frames)
@@ -235,7 +237,10 @@ class BucketBatchManager:
         return len(self.bucket_batch_indices)
 
     def _select_caption_variant(self, sd_te: dict) -> dict:
-        """If the cache uses caption_N_ prefixed keys, randomly pick one variant.
+        """If the cache uses caption_N_ prefixed keys, select one variant.
+
+        When enable_multi_caption is False (default), always uses caption_0.
+        When enable_multi_caption is True, picks a random caption index.
 
         Returns a dict with the caption prefix stripped (bare keys), ready for the
         existing key-parsing logic in __getitem__.
@@ -243,6 +248,11 @@ class BucketBatchManager:
         # Detect multi-caption format by checking for "caption_0_" prefix
         if not any(k.startswith("caption_0_") for k in sd_te):
             return sd_te  # old single-caption format, use as-is
+
+        # When multi-caption is disabled, always use caption_0 (ignore extra captions)
+        if not self.enable_multi_caption:
+            prefix = "caption_0_"
+            return {k[len(prefix):]: v for k, v in sd_te.items() if k.startswith(prefix)}
 
         # Collect all numeric caption indices (excludes "caption_empty_*")
         caption_indices = set()

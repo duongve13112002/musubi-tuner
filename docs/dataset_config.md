@@ -46,13 +46,13 @@ num_repeats = 1 # optional, default is 1. Number of times to repeat the dataset.
 
 `image_directory` is the directory containing images. The captions are stored in text files with the same filename as the image, but with the extension specified by `caption_extension` (for example, `image1.jpg` and `image1.txt`).
 
-**Multi-caption support:** Each non-empty line in the `.txt` file is treated as a separate caption. At each training step one caption is selected at random. A file with a single line behaves exactly as before.
+**Multi-caption support:** Each non-empty line in the `.txt` file is treated as a separate caption. Set `enable_multi_caption = true` in the dataset config to enable random caption selection at each training step. A file with a single line behaves exactly as before regardless of this setting. See [multi_caption.md](multi_caption.md) for details.
 
 ```
 # image1.txt — single caption (unchanged behavior)
 A photo of a cat sitting on a windowsill
 
-# image2.txt — three alternative captions
+# image2.txt — three alternative captions (requires enable_multi_caption = true to rotate)
 A cat on a windowsill
 Tabby cat resting near a sunny window
 Domestic cat overlooking the street
@@ -127,7 +127,7 @@ JSONL file format for metadata:
 {"image_path": "/path/to/image2.jpg", "caption": "A caption for image2"}
 ```
 
-**Multi-caption support:** Use the `captions` key with a list of strings instead of `caption`. At each training step one caption is selected at random. Both keys can be mixed in the same file.
+**Multi-caption support:** Use the `captions` key with a list of strings instead of `caption`. Set `enable_multi_caption = true` in the dataset config to enable random caption selection at each training step. Both keys can be mixed in the same file. See [multi_caption.md](multi_caption.md) for details.
 
 ```json
 {"image_path": "/path/to/image1.jpg", "captions": ["First caption", "Second caption", "Third caption"]}

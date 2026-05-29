@@ -41,11 +41,16 @@ def _make_item(key: str, captions: list[str], cache_path: str) -> ItemInfo:
     return item
 
 
-def _make_manager(dropout_rate: float = 0.0, empty_path: str = None) -> BucketBatchManager:
+def _make_manager(
+    dropout_rate: float = 0.0,
+    empty_path: str = None,
+    enable_multi_caption: bool = True,
+) -> BucketBatchManager:
     """Minimal BucketBatchManager just for testing _select_caption_variant."""
     mgr = BucketBatchManager.__new__(BucketBatchManager)
     mgr.caption_dropout_rate = dropout_rate
     mgr.empty_caption_cache_path = empty_path
+    mgr.enable_multi_caption = enable_multi_caption
     mgr.timestep_pool = None
     return mgr
 
@@ -189,7 +194,69 @@ class TestSelectCaptionVariant(unittest.TestCase):
                 self.assertFalse(float(result["embed_bfloat16"].mean()) > 90)
 
 
-# 3. encode_empty_caption_embeddings
+# 3. enable_multi_caption flag
+
+
+class TestEnableMultiCaptionFlag(unittest.TestCase):
+    def _make_multi_caption_sd(self) -> dict:
+        return {
+            "caption_0_embed_bfloat16": torch.zeros(4),
+            "caption_1_embed_bfloat16": torch.ones(4) * 2,
+        }
+
+    def test_disabled_by_default_always_picks_caption_0(self):
+        """enable_multi_caption=False (default) → always use caption_0, never caption_1."""
+        mgr = _make_manager(enable_multi_caption=False)
+        sd = self._make_multi_caption_sd()
+        for _ in range(50):
+            result = mgr._select_caption_variant(sd)
+            self.assertIn("embed_bfloat16", result)
+            # caption_0 is all zeros
+            self.assertAlmostEqual(float(result["embed_bfloat16"].mean()), 0.0, places=3)
+
+    def test_enabled_picks_randomly(self):
+        """enable_multi_caption=True → both caption_0 and caption_1 are reachable."""
+        mgr = _make_manager(enable_multi_caption=True)
+        sd = self._make_multi_caption_sd()
+        selected_values = set()
+        for _ in range(200):
+            result = mgr._select_caption_variant(sd)
+            val = round(float(result["embed_bfloat16"].mean()), 1)
+            selected_values.add(val)
+        self.assertEqual(selected_values, {0.0, 2.0})
+
+    def test_disabled_strips_caption_0_prefix(self):
+        """enable_multi_caption=False → caption_0_ prefix is stripped from keys."""
+        mgr = _make_manager(enable_multi_caption=False)
+        sd = {
+            "caption_0_embed_bfloat16": torch.zeros(4),
+            "caption_0_mask": torch.ones(2),
+            "caption_1_embed_bfloat16": torch.ones(4),
+        }
+        result = mgr._select_caption_variant(sd)
+        self.assertIn("embed_bfloat16", result)
+        self.assertIn("mask", result)
+        self.assertNotIn("caption_0_embed_bfloat16", result)
+        self.assertNotIn("caption_1_embed_bfloat16", result)
+
+    def test_legacy_bare_keys_pass_through_regardless_of_flag(self):
+        """Legacy single-caption format passes through whether flag is True or False."""
+        sd = {"embed_bfloat16": torch.zeros(4), "mask": torch.ones(2)}
+        for flag in [True, False]:
+            mgr = _make_manager(enable_multi_caption=flag)
+            result = mgr._select_caption_variant(sd)
+            self.assertIs(result, sd)
+
+    def test_single_caption_multi_format_disabled(self):
+        """Only caption_0 present + enable_multi_caption=False → returns caption_0 content."""
+        mgr = _make_manager(enable_multi_caption=False)
+        sd = {"caption_0_embed_bfloat16": torch.full((4,), 7.0)}
+        result = mgr._select_caption_variant(sd)
+        self.assertIn("embed_bfloat16", result)
+        self.assertAlmostEqual(float(result["embed_bfloat16"].mean()), 7.0, places=3)
+
+
+# 4. encode_empty_caption_embeddings
 
 
 class TestEncodeEmptyCaptionEmbeddings(unittest.TestCase):

@@ -128,6 +128,7 @@ class BaseDataset(torch.utils.data.Dataset):
         debug_dataset: bool = False,
         architecture: str = "no_default",
         caption_dropout_rate: float = 0.0,
+        enable_multi_caption: bool = False,
     ):
         self.resolution = resolution
         self.caption_extension = caption_extension
@@ -139,6 +140,7 @@ class BaseDataset(torch.utils.data.Dataset):
         self.debug_dataset = debug_dataset
         self.architecture = architecture
         self.caption_dropout_rate = caption_dropout_rate
+        self.enable_multi_caption = enable_multi_caption
         self.seed = None
         self.current_epoch = 0
         self.shared_epoch = None
@@ -302,6 +304,7 @@ class ImageDataset(BaseDataset):
         debug_dataset: bool = False,
         architecture: str = "no_default",
         caption_dropout_rate: float = 0.0,
+        enable_multi_caption: bool = False,
     ):
         super(ImageDataset, self).__init__(
             resolution,
@@ -314,6 +317,7 @@ class ImageDataset(BaseDataset):
             debug_dataset,
             architecture,
             caption_dropout_rate,
+            enable_multi_caption,
         )
         self.image_directory = image_directory
         self.image_jsonl_file = image_jsonl_file
@@ -567,6 +571,7 @@ class ImageDataset(BaseDataset):
             num_timestep_buckets=num_timestep_buckets,
             caption_dropout_rate=self.caption_dropout_rate,
             empty_caption_cache_path=empty_path,
+            enable_multi_caption=self.enable_multi_caption,
         )
         self.batch_manager.show_bucket_info()
 
@@ -616,6 +621,7 @@ class VideoDataset(BaseDataset):
         debug_dataset: bool = False,
         architecture: str = "no_default",
         caption_dropout_rate: float = 0.0,
+        enable_multi_caption: bool = False,
     ):
         super(VideoDataset, self).__init__(
             resolution,
@@ -628,6 +634,7 @@ class VideoDataset(BaseDataset):
             debug_dataset,
             architecture,
             caption_dropout_rate,
+            enable_multi_caption,
         )
         self.video_directory = video_directory
         self.video_jsonl_file = video_jsonl_file
@@ -911,6 +918,7 @@ class VideoDataset(BaseDataset):
             num_timestep_buckets=num_timestep_buckets,
             caption_dropout_rate=self.caption_dropout_rate,
             empty_caption_cache_path=empty_path,
+            enable_multi_caption=self.enable_multi_caption,
         )
         self.batch_manager.show_bucket_info()
 

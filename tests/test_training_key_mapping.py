@@ -65,10 +65,11 @@ def _make_item(key: str, captions, cache_path: str) -> ItemInfo:
     return item
 
 
-def _make_manager(dropout_rate=0.0, empty_path=None) -> BucketBatchManager:
+def _make_manager(dropout_rate=0.0, empty_path=None, enable_multi_caption=True) -> BucketBatchManager:
     mgr = BucketBatchManager.__new__(BucketBatchManager)
     mgr.caption_dropout_rate = dropout_rate
     mgr.empty_caption_cache_path = empty_path
+    mgr.enable_multi_caption = enable_multi_caption
     mgr.timestep_pool = None
     return mgr
 
